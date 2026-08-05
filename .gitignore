@@ -1,0 +1,4 @@
+.env
+*.log
+owui-claude/node_modules/
+owui-hermes/__pycache__/

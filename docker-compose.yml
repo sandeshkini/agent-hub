@@ -1,0 +1,94 @@
+name: agent-hub
+
+# Consolidated agent-hub stack: Open WebUI + both adapters + Ollama.
+# Reboot-safe via restart:unless-stopped (+ docker.service enabled).
+# Secrets come from .env (gitignored). OWUI reaches adapters by SERVICE NAME
+# on the compose network; owui-hermes reaches host Hermes via host-gateway.
+
+services:
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: open-webui
+    restart: unless-stopped
+    ports:
+      - "3000:8080"
+    volumes:
+      - open-webui:/app/backend/data
+    environment:
+      WEBUI_NAME: "Aibo Agents"
+      WEBUI_AUTH: "false"
+      # adapters are reachable by service name on the compose network
+      OPENAI_API_BASE_URLS: "http://owui-hermes:9211/v1;http://owui-claude:9212/v1"
+      OPENAI_API_KEYS: "${ADAPTER_KEY};${ADAPTER_KEY}"
+      ENABLE_FORWARD_USER_INFO_HEADERS: "true"   # forwards X-OpenWebUI-Chat-Id -> session continuity
+      ENABLE_OLLAMA_API: "false"
+      ENABLE_AUTOCOMPLETE_GENERATION: "false"
+      ENABLE_TITLE_GENERATION: "false"
+      ENABLE_TAGS_GENERATION: "false"
+      ENABLE_FOLLOW_UP_GENERATION: "false"
+      WHISPER_MODEL: "base"                       # local STT for voice
+      RESET_CONFIG_ON_START: "true"              # re-seed connections from env each boot
+      # shared web search (model-agnostic) via Tavily — scraping happens on Tavily's
+      # servers, so our home IP is never used (unlike SearXNG). Claude uses its own native search.
+      ENABLE_WEB_SEARCH: "true"
+      WEB_SEARCH_ENGINE: "tavily"
+      TAVILY_API_KEY: "${TAVILY_API_KEY}"
+      WEB_SEARCH_RESULT_COUNT: "5"
+      BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL: "true"   # inject Tavily's clean results directly (skip slow CPU rerank)
+      BYPASS_WEB_SEARCH_WEB_LOADER: "true"                # use Tavily's returned content; don't re-fetch each page (was ~82s)
+      # OWUI only runs its forced web-search RAG when a model's function-calling is "legacy".
+      # Our adapters are plain chat endpoints (no OWUI-native tools), so default every model to
+      # legacy → the web-search toggle actually fires. (Harmless for the adapters' internal tools.)
+      DEFAULT_MODEL_PARAMS: '{"function_calling":"legacy"}'
+    depends_on:
+      - owui-hermes
+      - owui-claude
+
+  owui-hermes:
+    build: ./owui-hermes
+    image: agent-hub/owui-hermes
+    container_name: owui-hermes
+    restart: unless-stopped
+    expose:
+      - "9211"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"      # reach host Hermes :9119
+    environment:
+      HERMES_BASE: "http://host.docker.internal:9119"
+      HERMES_DASH_USER: "${HERMES_DASH_USER}"
+      HERMES_DASH_PW: "${HERMES_DASH_PW}"
+      ADAPTER_KEY: "${ADAPTER_KEY}"
+      PORT: "9211"
+
+  owui-claude:
+    build: ./owui-claude
+    image: agent-hub/owui-claude
+    container_name: owui-claude
+    restart: unless-stopped
+    expose:
+      - "9212"
+    volumes:
+      - owui-claude-workspace:/workspace
+    environment:
+      CLAUDE_CODE_OAUTH_TOKEN: "${CLAUDE_CODE_OAUTH_TOKEN}"   # subscription OAuth (NOT ANTHROPIC_API_KEY)
+      ADAPTER_KEY: "${ADAPTER_KEY}"
+      OWUI_CLAUDE_PORT: "9212"
+      CLAUDE_MODELS: "${CLAUDE_MODELS}"
+      CLAUDE_MODEL: "${CLAUDE_MODEL}"
+      WORKSPACE: "/workspace"
+
+  ollama:
+    image: ollama/ollama
+    container_name: ollama
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:11434:11434"                  # host-local only; reserved for Phase-3 local LLM
+    volumes:
+      - ollama:/root/.ollama
+
+volumes:
+  open-webui:
+    external: true          # reuse existing volume (preserves chat history)
+  ollama:
+    external: true          # reuse existing volume
+  owui-claude-workspace: {} # new, compose-managed

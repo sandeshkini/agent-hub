@@ -1,0 +1,23 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "permission": {
+    "bash": {
+      "*": "allow",
+      "rm -rf /": "deny",
+      "rm -rf /*": "deny",
+      "rm -fr /*": "deny",
+      "rm --recursive --force /*": "deny",
+      "*--no-preserve-root*": "deny",
+      "mkfs*": "deny",
+      "*of=/dev/sd*": "deny",
+      "*of=/dev/nvme*": "deny",
+      "dd *of=/dev/*": "deny",
+      "wipefs*": "deny",
+      "shred *": "deny",
+      "chmod -R 000 /*": "deny",
+      "chown -R * /": "deny",
+      ":(){*": "deny",
+      "GUARDRAIL_PROBE_DENY*": "deny"
+    }
+  }
+}

@@ -18,8 +18,8 @@ services:
       WEBUI_NAME: "Aibo Agents"
       WEBUI_AUTH: "false"
       # adapters are reachable by service name on the compose network
-      OPENAI_API_BASE_URLS: "http://owui-hermes:9211/v1;http://owui-claude:9212/v1"
-      OPENAI_API_KEYS: "${ADAPTER_KEY};${ADAPTER_KEY}"
+      OPENAI_API_BASE_URLS: "http://owui-hermes:9211/v1;http://owui-claude:9212/v1;http://owui-opencode:9213/v1"
+      OPENAI_API_KEYS: "${ADAPTER_KEY};${ADAPTER_KEY};${ADAPTER_KEY}"
       ENABLE_FORWARD_USER_INFO_HEADERS: "true"   # forwards X-OpenWebUI-Chat-Id -> session continuity
       ENABLE_OLLAMA_API: "false"
       ENABLE_AUTOCOMPLETE_GENERATION: "false"
@@ -43,6 +43,7 @@ services:
     depends_on:
       - owui-hermes
       - owui-claude
+      - owui-opencode
 
   owui-hermes:
     build: ./owui-hermes
@@ -77,6 +78,33 @@ services:
       CLAUDE_MODEL: "${CLAUDE_MODEL}"
       WORKSPACE: "/workspace"
 
+  opencode:
+    build: ./opencode
+    image: agent-hub/opencode
+    container_name: opencode
+    restart: unless-stopped
+    expose:
+      - "4096"
+    volumes:
+      - opencode-workspace:/workspace
+    environment:
+      OPENCODE_API_KEY: "${OPENCODE_API_KEY}"   # opencode Zen provider (seeded into auth.json)
+
+  owui-opencode:
+    build: ./owui-opencode
+    image: agent-hub/owui-opencode
+    container_name: owui-opencode
+    restart: unless-stopped
+    expose:
+      - "9213"
+    environment:
+      OPENCODE_BASE: "http://opencode:4096"
+      ADAPTER_KEY: "${ADAPTER_KEY}"
+      PORT: "9213"
+      OPENCODE_MODELS: "${OPENCODE_MODELS}"
+    depends_on:
+      - opencode
+
   ollama:
     image: ollama/ollama
     container_name: ollama
@@ -92,3 +120,4 @@ volumes:
   ollama:
     external: true          # reuse existing volume
   owui-claude-workspace: {} # new, compose-managed
+  opencode-workspace: {}    # new, compose-managed

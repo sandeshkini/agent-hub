@@ -29,7 +29,7 @@ import http.cookiejar
 from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from websockets.sync.client import connect as ws_connect
-from owui_mirror import Mirror, ff_write, ff_clear, ff_recover
+from owui_mirror import Mirror, ff_write, ff_clear, ff_recover, tool_card
 
 BASE = os.getenv("HERMES_BASE", "http://127.0.0.1:9119")
 USER = os.getenv("HERMES_DASH_USER", "sandesh")
@@ -311,6 +311,7 @@ def stream_turn(chat_id, messages):
 
             submit_rid = conn.send("prompt.submit", {"session_id": sid, "text": text})
             got_delta = False
+            last_tool = {}
             complete_text = ""
             usage = None
             idle_deadline = time.monotonic() + IDLE_TIMEOUT
@@ -362,20 +363,17 @@ def stream_turn(chat_id, messages):
                         got_delta = True
                         yield {"content": pay["text"]}
                 elif t == "tool.start":
-                    name = pay.get("name", "tool")
-                    ctx = str(pay.get("context", "")).replace("\n", " ").strip()
-                    yield {"content": f"\n\n🔧 **{name}**" + (f" · {ctx}" if ctx else "") + "\n"}
+                    last_tool = {"name": pay.get("name", "tool"),
+                                 "args": pay.get("context") or pay.get("input") or {}}
                 elif t == "tool.complete":
                     res = pay.get("result") or {}
                     out = res.get("output")
                     out = "" if out is None else str(out)
                     out = out.rstrip()
                     ec = res.get("exit_code")
-                    if len(out) > TOOL_OUTPUT_CAP:
-                        out = out[:TOOL_OUTPUT_CAP] + "\n…(truncated)"
-                    status = "✅" if ec in (None, 0) else f"⚠️ exit {ec}"
-                    block = (_fence(out) + "\n") if out else ""
-                    yield {"content": f"{block}{status}\n\n"}   # blank line → following prose = fresh block
+                    # native OWUI tool card (collapsible "View Result from <name>")
+                    yield {"content": tool_card(last_tool.get("name", "tool"), last_tool.get("args"), out, ec not in (None, 0))}
+                    last_tool = {}
                 elif t == "error":
                     msg = pay.get("message") if isinstance(pay, dict) else None
                     yield {"content": f"\n\n_error: {str(msg or pay)[:400]}_"}

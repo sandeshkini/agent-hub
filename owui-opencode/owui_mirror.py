@@ -3,10 +3,29 @@ OWUI chat message. OWUI forwards X-OpenWebUI-Chat-Id/-Message-Id/-User-Jwt; POST
 {content} to /api/v1/chats/{cid}/messages/{mid} both persists AND emits a live socket
 update, so a run's progress + result land in the chat whether or not a browser watches.
 No-op when the headers aren't present (e.g. a raw API call, not a real OWUI chat)."""
-import glob, json, os, threading, time, urllib.request
+import glob, html, json, os, threading, time, urllib.request
 
 OWUI_BASE = os.getenv("OWUI_BASE", "http://open-webui:8080").rstrip("/")
 _MS = float(os.getenv("MIRROR_THROTTLE_MS", "1500")) / 1000.0
+
+
+def tool_card(name, arguments, result, is_error=False):
+    """Markup OWUI renders as a NATIVE tool card ("✓ View Result from <name>", expandable to
+    args + result). Verified via screenshot that OWUI renders <details type="tool_calls"> from stored
+    content (a *typed* details block — plain <details>/<think> render as literal tags)."""
+    res = "" if result is None else str(result)
+    if len(res) > 4000:
+        res = res[:4000] + "\n…(truncated)"
+    args = arguments if isinstance(arguments, str) else json.dumps(arguments or {})
+
+    def esc(s):
+        return html.escape("" if s is None else str(s), quote=True)
+
+    return ('\n<details type="tool_calls" done="true" name="' + esc(name)
+            + '" arguments="' + esc(args)
+            + '" result="' + esc(json.dumps(res)) + '"'
+            + (' error="true"' if is_error else "")
+            + '>\n<summary>Tool Executed</summary>\n</details>\n')
 
 
 class Mirror:

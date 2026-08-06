@@ -20,7 +20,7 @@ import time
 import urllib.request
 from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from owui_mirror import Mirror, ff_write, ff_clear, ff_recover
+from owui_mirror import Mirror, ff_write, ff_clear, ff_recover, tool_card
 
 OC = os.getenv("OPENCODE_BASE", "http://opencode:4096").rstrip("/")
 ADAPTER_KEY = os.getenv("ADAPTER_KEY", "")
@@ -227,20 +227,16 @@ def stream_turn(chat_id, model, messages):
                     state = part.get("state", {}) or {}
                     status = state.get("status") or part.get("status")
                     if pid and pid not in seen_tools:
-                        seen_tools[pid] = True
-                        title = state.get("title") or ""
-                        yield {"content": f"\n\n🔧 **{name}**{(' · ' + title) if title else ''}\n"}
+                        seen_tools[pid] = True   # native card is self-labeled; no header line needed
                     if pid and pid not in tool_done and status in ("completed", "error"):
                         tool_done.add(pid)
                         out = state.get("output") or ""
                         if isinstance(out, (dict, list)):
                             out = json.dumps(out)
                         out = (out or "").strip()
-                        if len(out) > TOOL_OUTPUT_CAP:
-                            out = out[:TOOL_OUTPUT_CAP] + "\n…(truncated)"
-                        mark = "⚠️" if status == "error" else "✅"
-                        # trailing blank line so following prose starts a fresh markdown block
-                        yield {"content": (_fence(out) + "\n" if out else "") + mark + "\n\n"}
+                        args = state.get("input") or state.get("args") or {}
+                        # native OWUI tool card (collapsible "View Result from <name>")
+                        yield {"content": tool_card(name, args, out, status == "error")}
 
             elif typ == "session.idle":
                 break

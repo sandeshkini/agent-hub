@@ -80,6 +80,18 @@ function buildPrompt(userMsg) {
   return (async function* () { yield { type: "user", message: { role: "user", content: blocks } }; })();
 }
 
+// HTML-attribute escape for the native <details type="tool_calls"> card.
+function htmlAttr(s) {
+  return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+// Build the markup OWUI renders as a NATIVE tool card ("✓ View Result from <name>", expandable to
+// args+result). Verified via screenshot that OWUI renders <details type="tool_calls"> from stored content.
+function toolCard(name, argsJson, resultText, isError) {
+  let res = resultText || "";
+  if (res.length > 4000) res = res.slice(0, 4000) + "\n…(truncated)";
+  return `\n<details type="tool_calls" done="true" name="${htmlAttr(name)}" arguments="${htmlAttr(argsJson || "{}")}" result="${htmlAttr(JSON.stringify(res))}"${isError ? ' error="true"' : ""}>\n<summary>Tool Executed</summary>\n</details>\n`;
+}
+
 // ── the turn: yields {content}/{usage} ──
 async function* streamTurn(chatId, model, messages) {
   const um = lastUser(messages);
@@ -97,19 +109,22 @@ async function* streamTurn(chatId, model, messages) {
   try { q = query({ prompt, options: opts }); }
   catch (e) { yield { content: `\n_Claude adapter error: ${e && e.message || e}_` }; return; }
 
-  let streamedText = "", tool = {}, toolJson = {}, toolQueue = [], completed = false;
+  let streamedText = "", tool = {}, toolJson = {}, toolQueue = [], pendingTools = {}, completed = false;
   try {
     for await (const m of q) {
       if (m.type === "system" && m.subtype === "init") { if (m.session_id) cachePut(conv, m.session_id); }
       else if (m.type === "stream_event") {
         const ev = m.event;
         if (ev?.type === "content_block_start" && ev.content_block?.type === "tool_use") {
-          tool[ev.index] = { name: ev.content_block.name }; toolJson[ev.index] = "";
-          toolQueue.push(ev.content_block.name);   // remembered so the result's collapsible can label itself
+          tool[ev.index] = { name: ev.content_block.name, id: ev.content_block.id }; toolJson[ev.index] = "";
+          toolQueue.push(ev.content_block.name);   // fallback label if we can't correlate by id
         } else if (ev?.type === "content_block_delta" && ev.delta) {
           if (ev.delta.type === "text_delta" && ev.delta.text) { streamedText += ev.delta.text; yield { content: ev.delta.text }; }
           else if (ev.delta.type === "input_json_delta" && tool[ev.index]) toolJson[ev.index] += (ev.delta.partial_json || "");
-        } else if (ev?.type === "content_block_stop" && tool[ev.index]) { delete tool[ev.index]; delete toolJson[ev.index]; }
+        } else if (ev?.type === "content_block_stop" && tool[ev.index]) {
+          pendingTools[tool[ev.index].id] = { name: tool[ev.index].name, input: toolJson[ev.index] || "" };   // keep name+args for the card
+          delete tool[ev.index]; delete toolJson[ev.index];
+        }
       } else if (m.type === "assistant") {
         const norm = streamedText.replace(/\s+/g, "");
         for (const b of (m.message?.content || [])) {
@@ -121,28 +136,11 @@ async function* streamTurn(chatId, model, messages) {
         if (Array.isArray(c)) for (const b of c) if (b.type === "tool_result") {
           let txt = typeof b.content === "string" ? b.content : Array.isArray(b.content) ? b.content.filter(x => x.type === "text").map(x => x.text).join("\n") : "";
           txt = (txt || "").trim();
-          const name = toolQueue.shift() || "tool";
-          const mark = b.is_error ? "⚠️ error" : "✓";
-          let out;
-          if (txt) {
-            // Render tool output as a fenced ``` code block. VERIFIED via screenshot that OWUI renders
-            // fenced blocks (with Collapse/Copy chrome) — while indented-code renders as flowed prose
-            // here, and <details>/<pre>/<think> show as literal tags. To keep the fence bulletproof we
-            // NEUTRALIZE every backtick in the output (→ U+02BB, a look-alike) so nothing in the tool
-            // dump can ever close the fence early and invert the rest of the message (the parity bug).
-            const allLines = txt.split("\n");
-            const total = allLines.length;
-            const MAXL = 12, MAXC = 1000;
-            let shown = allLines.slice(0, MAXL).join("\n");
-            let truncated = total > MAXL;
-            if (shown.length > MAXC) { shown = shown.slice(0, MAXC); truncated = true; }
-            shown = shown.replace(/`/g, "ʻ");           // fence-safe: no real backticks remain
-            if (truncated) shown += `\n… (${total} lines total — truncated)`;
-            out = `\n🔧 **${name}** · ${total} line${total === 1 ? "" : "s"} ${mark}\n\n\`\`\`\n${shown}\n\`\`\`\n\n`;
-          } else {
-            out = `\n🔧 **${name}** ${mark}\n\n`;
-          }
-          yield { content: out };
+          const pt = pendingTools[b.tool_use_id] || {};
+          const name = pt.name || toolQueue.shift() || "tool";
+          if (b.tool_use_id) delete pendingTools[b.tool_use_id];
+          // Native OWUI tool card (collapsible "View Result from <name>", expands to args + result).
+          yield { content: toolCard(name, pt.input, txt, b.is_error) };
         }
       } else if (m.type === "result") {
         if (m.session_id) cachePut(conv, m.session_id);

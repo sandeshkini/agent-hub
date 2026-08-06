@@ -378,7 +378,7 @@ def stream_turn(chat_id, messages):
                         out = out[:TOOL_OUTPUT_CAP] + "\n…(truncated)"
                     status = "✅" if ec in (None, 0) else f"⚠️ exit {ec}"
                     block = (_fence(out) + "\n") if out else ""
-                    yield {"content": f"{block}{status}\n"}
+                    yield {"content": f"{block}{status}\n\n"}   # blank line → following prose = fresh block
                 elif t == "error":
                     msg = pay.get("message") if isinstance(pay, dict) else None
                     yield {"content": f"\n\n_error: {str(msg or pay)[:400]}_"}

@@ -241,7 +241,8 @@ def stream_turn(chat_id, model, messages):
                         if len(out) > TOOL_OUTPUT_CAP:
                             out = out[:TOOL_OUTPUT_CAP] + "\n…(truncated)"
                         mark = "⚠️" if status == "error" else "✅"
-                        yield {"content": (_fence(out) + "\n" if out else "") + mark + "\n"}
+                        # trailing blank line so following prose starts a fresh markdown block
+                        yield {"content": (_fence(out) + "\n" if out else "") + mark + "\n\n"}
 
             elif typ == "session.idle":
                 break

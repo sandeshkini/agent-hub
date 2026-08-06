@@ -97,7 +97,7 @@ async function* streamTurn(chatId, model, messages) {
   try { q = query({ prompt, options: opts }); }
   catch (e) { yield { content: `\n_Claude adapter error: ${e && e.message || e}_` }; return; }
 
-  let streamedText = "", tool = {}, toolJson = {}, completed = false;
+  let streamedText = "", tool = {}, toolJson = {}, toolQueue = [], completed = false;
   try {
     for await (const m of q) {
       if (m.type === "system" && m.subtype === "init") { if (m.session_id) cachePut(conv, m.session_id); }
@@ -105,7 +105,7 @@ async function* streamTurn(chatId, model, messages) {
         const ev = m.event;
         if (ev?.type === "content_block_start" && ev.content_block?.type === "tool_use") {
           tool[ev.index] = { name: ev.content_block.name }; toolJson[ev.index] = "";
-          yield { content: `\n\n🔧 **${ev.content_block.name}**\n` };
+          toolQueue.push(ev.content_block.name);   // remembered so the result's collapsible can label itself
         } else if (ev?.type === "content_block_delta" && ev.delta) {
           if (ev.delta.type === "text_delta" && ev.delta.text) { streamedText += ev.delta.text; yield { content: ev.delta.text }; }
           else if (ev.delta.type === "input_json_delta" && tool[ev.index]) toolJson[ev.index] += (ev.delta.partial_json || "");
@@ -120,18 +120,26 @@ async function* streamTurn(chatId, model, messages) {
         const c = m.message?.content;
         if (Array.isArray(c)) for (const b of c) if (b.type === "tool_result") {
           let txt = typeof b.content === "string" ? b.content : Array.isArray(b.content) ? b.content.filter(x => x.type === "text").map(x => x.text).join("\n") : "";
-          txt = (txt || "").trim(); if (txt.length > 4000) txt = txt.slice(0, 4000) + "\n…(truncated)";
-          let block = "";
+          txt = (txt || "").trim();
+          const name = toolQueue.shift() || "tool";
+          const mark = b.is_error ? "⚠️ error" : "✓";
+          const LIMIT = 1400;                     // keep tool dumps small; full run is on disk anyway
+          let more = 0;
+          if (txt.length > LIMIT) { more = txt.length - LIMIT; txt = txt.slice(0, LIMIT); }
+          let out;
           if (txt) {
-            // backtick-safe fence: use one more backtick than the longest run inside txt,
-            // so tool output containing ``` (READMEs, JSON, markdown) can't close the fence early
-            // and swallow the model's prose into a code block.
-            const runs = (txt.match(/`+/g) || []).map(s => s.length);
+            const nlines = txt.split("\n").length;
+            // backtick-safe fence: one longer than any run inside, so embedded ``` can't break out
+            const runs = (txt.match(/`+/g) || []).map(x => x.length);
             const f = "`".repeat(Math.max(3, (runs.length ? Math.max(...runs) : 0) + 1));
-            block = f + "\n" + txt + "\n" + f + "\n";
+            const body = f + "\n" + txt + (more ? `\n…(+${more} more chars truncated)` : "") + "\n" + f;
+            // Collapse tool activity into a foldable block so long dumps don't flood the chat.
+            // OWUI renders <details>; the blank line after </summary> lets the fenced code render inside.
+            out = `\n<details>\n<summary>🔧 <b>${name}</b> · ${nlines} line${nlines === 1 ? "" : "s"} ${mark}</summary>\n\n${body}\n\n</details>\n\n`;
+          } else {
+            out = `🔧 <b>${name}</b> ${mark}\n\n`;
           }
-          // trailing blank line so a following text delta starts a fresh markdown block (doesn't merge)
-          yield { content: block + (b.is_error ? "⚠️" : "✅") + "\n\n" };
+          yield { content: out };
         }
       } else if (m.type === "result") {
         if (m.session_id) cachePut(conv, m.session_id);

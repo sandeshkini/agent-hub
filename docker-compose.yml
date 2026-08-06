@@ -75,15 +75,18 @@ services:
     restart: unless-stopped
     expose:
       - "9212"
+    user: "1000:1000"                 # = host user beastblaster; files created keep correct ownership
+    # (no working_dir override — node runs server.mjs from /app; the AGENT's cwd is WORKSPACE below)
     volumes:
-      - owui-claude-workspace:/workspace
+      - /home/beastblaster:/home/beastblaster   # full host home access (agents work on real files)
     environment:
       CLAUDE_CODE_OAUTH_TOKEN: "${CLAUDE_CODE_OAUTH_TOKEN}"   # subscription OAuth (NOT ANTHROPIC_API_KEY)
       ADAPTER_KEY: "${ADAPTER_KEY}"
       OWUI_CLAUDE_PORT: "9212"
       CLAUDE_MODELS: "${CLAUDE_MODELS}"
       CLAUDE_MODEL: "${CLAUDE_MODEL}"
-      WORKSPACE: "/workspace"
+      WORKSPACE: "/home/beastblaster"
+      HOME: "/home/node"              # container-isolated CLI config (uid 1000 owns /home/node)
 
   opencode:
     build: ./opencode
@@ -92,10 +95,13 @@ services:
     restart: unless-stopped
     expose:
       - "4096"
+    user: "1000:1000"                 # = host user; file ops keep correct ownership
+    working_dir: /home/beastblaster
     volumes:
-      - opencode-workspace:/workspace
+      - /home/beastblaster:/home/beastblaster   # full host home access
     environment:
       OPENCODE_API_KEY: "${OPENCODE_API_KEY}"   # opencode Zen provider (seeded into auth.json)
+      HOME: "/home/node"              # container-isolated opencode config/auth (uid 1000 owns /home/node)
 
   owui-opencode:
     build: ./owui-opencode

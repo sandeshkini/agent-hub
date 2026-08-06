@@ -180,14 +180,11 @@ def _conv_key(chat_id, messages):
 
 
 def _fence(text):
-    """Wrap in a backtick fence longer than any run inside, so embedded ``` can't break out."""
-    longest = 0
-    run = 0
-    for ch in text:
-        run = run + 1 if ch == "`" else 0
-        longest = max(longest, run)
-    bt = "`" * max(3, longest + 1)
-    return f"{bt}\n{text}\n{bt}"
+    """Plain ``` fence with backticks NEUTRALIZED (-> U+02BB look-alike). Verified via screenshot that
+    OWUI renders fenced code blocks (indented code / <details> / <think> do NOT render reliably);
+    neutralizing backticks means nothing in the tool output can close the fence early and invert the
+    rest of the message (the parity bug)."""
+    return "```\n" + text.replace("`", "ʻ") + "\n```"
 
 
 # ── websocket client ──────────────────────────────────────────────────

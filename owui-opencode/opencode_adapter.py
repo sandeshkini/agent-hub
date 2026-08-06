@@ -77,12 +77,10 @@ def _model_id(owui_model):
 
 
 def _fence(text):
-    longest = run = 0
-    for ch in text:
-        run = run + 1 if ch == "`" else 0
-        longest = max(longest, run)
-    bt = "`" * max(3, longest + 1)
-    return f"{bt}\n{text}\n{bt}"
+    """Plain ``` fence with backticks NEUTRALIZED (-> U+02BB look-alike). Verified via screenshot that
+    OWUI renders fenced code blocks (indented / <details> / <think> do NOT); neutralizing backticks
+    means nothing in the output can close the fence early and invert the message (the parity bug)."""
+    return "```\n" + text.replace("`", "ʻ") + "\n```"
 
 
 def _chat_key(chat_id, messages):

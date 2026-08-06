@@ -21,7 +21,8 @@ services:
       OPENAI_API_BASE_URLS: "http://owui-hermes:9211/v1;http://owui-claude:9212/v1;http://owui-opencode:9213/v1"
       OPENAI_API_KEYS: "${ADAPTER_KEY};${ADAPTER_KEY};${ADAPTER_KEY}"
       ENABLE_FORWARD_USER_INFO_HEADERS: "true"   # forwards X-OpenWebUI-Chat-Id -> session continuity
-      ENABLE_OLLAMA_API: "false"
+      ENABLE_OLLAMA_API: "true"                  # Phase 3: local model fallback
+      OLLAMA_BASE_URL: "http://ollama:11434"     # reach the ollama container by service name
       # agents/personas primitives (personas = Workspace Models; grouped by Folders;
       # orchestrated via Channels + Automations + background Subagents)
       ENABLE_CHANNELS: "true"
@@ -51,6 +52,9 @@ services:
       - owui-hermes
       - owui-claude
       - owui-opencode
+    networks:
+      - default          # reach the adapters by service name
+      - apps             # reach the artifacts board (http://artifacts:8080) + publish/notify
 
   owui-hermes:
     build: ./owui-hermes
@@ -134,3 +138,8 @@ volumes:
     external: true          # reuse existing volume
   owui-claude-workspace: {} # new, compose-managed
   opencode-workspace: {}    # new, compose-managed
+
+networks:
+  default:                  # the agent-hub stack's own network (adapters ↔ OWUI)
+  apps:
+    external: true          # shared 'apps' network → OWUI can reach the artifacts board (publish/notify)

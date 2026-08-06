@@ -121,7 +121,16 @@ async function* streamTurn(chatId, model, messages) {
         if (Array.isArray(c)) for (const b of c) if (b.type === "tool_result") {
           let txt = typeof b.content === "string" ? b.content : Array.isArray(b.content) ? b.content.filter(x => x.type === "text").map(x => x.text).join("\n") : "";
           txt = (txt || "").trim(); if (txt.length > 4000) txt = txt.slice(0, 4000) + "\n…(truncated)";
-          yield { content: (txt ? "```\n" + txt + "\n```\n" : "") + (b.is_error ? "⚠️\n" : "✅\n") };
+          let block = "";
+          if (txt) {
+            // backtick-safe fence: use one more backtick than the longest run inside txt,
+            // so tool output containing ``` (READMEs, JSON, markdown) can't close the fence early
+            // and swallow the model's prose into a code block.
+            const runs = (txt.match(/`+/g) || []).map(s => s.length);
+            const f = "`".repeat(Math.max(3, (runs.length ? Math.max(...runs) : 0) + 1));
+            block = f + "\n" + txt + "\n" + f + "\n";
+          }
+          yield { content: block + (b.is_error ? "⚠️\n" : "✅\n") };
         }
       } else if (m.type === "result") {
         if (m.session_id) cachePut(conv, m.session_id);

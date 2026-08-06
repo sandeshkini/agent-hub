@@ -22,6 +22,13 @@ services:
       OPENAI_API_KEYS: "${ADAPTER_KEY};${ADAPTER_KEY};${ADAPTER_KEY}"
       ENABLE_FORWARD_USER_INFO_HEADERS: "true"   # forwards X-OpenWebUI-Chat-Id -> session continuity
       ENABLE_OLLAMA_API: "false"
+      # agents/personas primitives (personas = Workspace Models; grouped by Folders;
+      # orchestrated via Channels + Automations + background Subagents)
+      ENABLE_CHANNELS: "true"
+      ENABLE_FOLDERS: "true"
+      ENABLE_SUBAGENTS: "true"
+      SUBAGENTS_BACKGROUND_ENABLED: "true"
+      ENABLE_AUTOMATIONS: "true"
       ENABLE_AUTOCOMPLETE_GENERATION: "false"
       ENABLE_TITLE_GENERATION: "false"
       ENABLE_TAGS_GENERATION: "false"

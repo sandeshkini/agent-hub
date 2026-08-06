@@ -261,6 +261,12 @@ def _transcript(messages):
 
 
 # ── the turn ──────────────────────────────────────────────────────────
+def _system_of(messages):
+    """Persona/system prompt (OWUI Models send a system message) → forward to Hermes."""
+    return "\n\n".join(_text_of(m) for m in messages
+                       if isinstance(m, dict) and m.get("role") == "system" and _text_of(m).strip())
+
+
 def stream_turn(chat_id, messages):
     """Yield dicts: {'content': str} or {'heartbeat': True}. One turn."""
     conv = _conv_key(chat_id, messages)
@@ -271,6 +277,9 @@ def stream_turn(chat_id, messages):
         return
     if images and not last:
         last = "Please analyze the attached image(s)."
+    _sys = _system_of(messages)
+    if _sys:
+        last = f"{_sys}\n\n{last}"          # persona instructions
 
     with _conv_lock(conv):                       # serialise turns for this chat
         try:

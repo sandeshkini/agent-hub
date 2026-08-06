@@ -55,6 +55,8 @@ function textOf(content) {
   return "";
 }
 function lastUser(messages) { for (let i = messages.length - 1; i >= 0; i--) if (messages[i].role === "user") return messages[i]; return null; }
+// Persona/system prompt (OWUI Models send a system message) — forward it to the agent.
+function systemOf(messages) { return (messages || []).filter(m => m && m.role === "system").map(m => textOf(m.content)).filter(Boolean).join("\n\n"); }
 function chatIdFrom(req, body) {
   return req.headers["x-openwebui-chat-id"] || (body.metadata && body.metadata.chat_id) || body.chat_id || null;
 }
@@ -82,10 +84,13 @@ function buildPrompt(userMsg) {
 async function* streamTurn(chatId, model, messages) {
   const um = lastUser(messages);
   if (!um) { yield { content: "_(no user message)_" }; return; }
-  const prompt = buildPrompt(um);
+  const sys = systemOf(messages);
+  let prompt = buildPrompt(um);
+  if (sys && typeof prompt === "string") prompt = sys + "\n\n" + prompt;   // persona instructions
   const conv = chatId ? "id:" + chatId : "h:" + textOf(um.content).slice(0, 40);
   const resume = cacheGet(conv);
   const opts = { canUseTool, cwd: WORKSPACE, includePartialMessages: true, model: model || DEFAULT_MODEL };
+  if (sys) opts.appendSystemPrompt = sys;                                   // also as a real system prompt (covers image turns)
   if (resume) opts.resume = resume;
 
   let q;

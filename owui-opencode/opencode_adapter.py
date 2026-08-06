@@ -112,9 +112,16 @@ def _get_session(chat_key):
 
 
 # ── the turn ──────────────────────────────────────────────────────────
+def _system_of(messages):
+    """Persona/system prompt (OWUI Models send a system message) → opencode native `system`."""
+    return "\n\n".join(_text_of(m) for m in messages
+                       if isinstance(m, dict) and m.get("role") == "system" and _text_of(m).strip())
+
+
 def stream_turn(chat_id, model, messages):
     """Yield {'content': str} / {'heartbeat': True} / {'usage': {...}} for one turn."""
     text = _last_user(messages)
+    _sys = _system_of(messages)
     if not text:
         yield {"content": "_(no user message)_"}
         return
@@ -158,11 +165,11 @@ def stream_turn(chat_id, model, messages):
 
     def _post():
         try:
-            post_result["msg"] = _json(
-                "POST", f"/session/{sid}/message",
-                {"model": {"providerID": PROVIDER, "modelID": model_id},
-                 "parts": [{"type": "text", "text": text}]},
-                timeout=ABS_TIMEOUT)
+            _body = {"model": {"providerID": PROVIDER, "modelID": model_id},
+                     "parts": [{"type": "text", "text": text}]}
+            if _sys:
+                _body["system"] = _sys          # persona instructions (opencode native)
+            post_result["msg"] = _json("POST", f"/session/{sid}/message", _body, timeout=ABS_TIMEOUT)
         except Exception as e:
             post_result["err"] = str(e)
         finally:

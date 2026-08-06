@@ -134,13 +134,15 @@ async function* streamTurn(chatId, model, messages) {
       } else if (m.type === "user") {
         const c = m.message?.content;
         if (Array.isArray(c)) for (const b of c) if (b.type === "tool_result") {
-          let txt = typeof b.content === "string" ? b.content : Array.isArray(b.content) ? b.content.filter(x => x.type === "text").map(x => x.text).join("\n") : "";
-          txt = (txt || "").trim();
-          const pt = pendingTools[b.tool_use_id] || {};
-          const name = pt.name || toolQueue.shift() || "tool";
-          if (b.tool_use_id) delete pendingTools[b.tool_use_id];
-          // Native OWUI tool card (collapsible "View Result from <name>", expands to args + result).
-          yield { content: toolCard(name, pt.input, txt, b.is_error) };
+          try {   // one bad tool result must not kill the turn
+            let txt = typeof b.content === "string" ? b.content : Array.isArray(b.content) ? b.content.filter(x => x.type === "text").map(x => x.text).join("\n") : "";
+            txt = (txt || "").trim();
+            const pt = pendingTools[b.tool_use_id] || {};
+            const name = pt.name || toolQueue.shift() || "tool";
+            if (b.tool_use_id) delete pendingTools[b.tool_use_id];
+            // Native OWUI tool card (collapsible "View Result from <name>", expands to args + result).
+            yield { content: toolCard(name, pt.input, txt, b.is_error) };
+          } catch (te) { console.error("[owui-claude] tool_result render error:", te && te.message || te); }
         }
       } else if (m.type === "result") {
         if (m.session_id) cachePut(conv, m.session_id);
@@ -151,7 +153,8 @@ async function* streamTurn(chatId, model, messages) {
       }
     }
   } catch (e) {
-    yield { content: `\n\n_Claude error: ${String(e && e.message || e).slice(0, 300)}_` };
+    console.error("[owui-claude] streamTurn error:", e && e.stack || e && e.message || e);   // never swallow silently
+    yield { content: `\n\n_⚠️ Claude adapter hiccup (${String(e && e.message || e).slice(0, 200)}). Partial result is above — resend to continue._` };
   } finally {
     // interrupt ONLY if the turn didn't finish (client aborted). On normal completion the
     // process is already gone and interrupt() rejects — catch that (it's a promise, not a throw).

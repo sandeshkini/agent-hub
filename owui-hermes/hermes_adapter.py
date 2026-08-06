@@ -24,6 +24,7 @@ import json
 import os
 import threading
 import time
+import traceback
 import urllib.request
 import http.cookiejar
 from collections import OrderedDict
@@ -339,54 +340,61 @@ def stream_turn(chat_id, messages):
 
                 idle_deadline = time.monotonic() + IDLE_TIMEOUT   # reset on any frame
 
-                if f.get("id") == submit_rid:
-                    if f.get("error"):                            # stale/expired session -> recreate once
-                        _cache_drop(conv)
-                        sid = _create_session(conn)
-                        if not sid:
-                            yield {"content": "_Hermes: session expired and could not be recreated._"}
-                            break
-                        _cache_put(conv, sid)
-                        if images:
-                            _attach_images(conn, sid, images)
-                        submit_rid = conn.send("prompt.submit", {"session_id": sid, "text": text})
-                    continue
+                # Per-frame processing is wrapped: a single malformed/unexpected frame (e.g. a failed
+                # computer_use payload) is logged and SKIPPED instead of killing the whole turn.
+                try:
+                    if f.get("id") == submit_rid:
+                        if f.get("error"):                            # stale/expired session -> recreate once
+                            _cache_drop(conv)
+                            sid = _create_session(conn)
+                            if not sid:
+                                yield {"content": "_Hermes: session expired and could not be recreated._"}
+                                break
+                            _cache_put(conv, sid)
+                            if images:
+                                _attach_images(conn, sid, images)
+                            submit_rid = conn.send("prompt.submit", {"session_id": sid, "text": text})
+                        continue
 
-                if f.get("method") != "event":
-                    continue
-                p = f.get("params") or {}
-                t = p.get("type")
-                pay = p.get("payload") or {}
+                    if f.get("method") != "event":
+                        continue
+                    p = f.get("params") or {}
+                    t = p.get("type")
+                    pay = p.get("payload") or {}
 
-                if t == "message.delta":
-                    if pay.get("text"):
-                        got_delta = True
-                        yield {"content": pay["text"]}
-                elif t == "tool.start":
-                    last_tool = {"name": pay.get("name", "tool"),
-                                 "args": pay.get("context") or pay.get("input") or {}}
-                elif t == "tool.complete":
-                    res = pay.get("result") or {}
-                    out = res.get("output")
-                    out = "" if out is None else str(out)
-                    out = out.rstrip()
-                    ec = res.get("exit_code")
-                    # native OWUI tool card (collapsible "View Result from <name>")
-                    yield {"content": tool_card(last_tool.get("name", "tool"), last_tool.get("args"), out, ec not in (None, 0))}
-                    last_tool = {}
-                elif t == "error":
-                    msg = pay.get("message") if isinstance(pay, dict) else None
-                    yield {"content": f"\n\n_error: {str(msg or pay)[:400]}_"}
-                    break
-                elif t == "message.complete":
-                    complete_text = pay.get("text", "")
-                    if not got_delta and complete_text:      # deltas missing -> use final text
-                        yield {"content": complete_text}
-                    u = pay.get("usage") or {}
-                    if u:
-                        yield {"usage": u}                    # #4 token usage
-                    completed = True
-                    break
+                    if t == "message.delta":
+                        if pay.get("text"):
+                            got_delta = True
+                            yield {"content": pay["text"]}
+                    elif t == "tool.start":
+                        last_tool = {"name": pay.get("name", "tool"),
+                                     "args": pay.get("context") or pay.get("input") or {}}
+                    elif t == "tool.complete":
+                        res = pay.get("result") or {}
+                        out = res.get("output")
+                        out = "" if out is None else str(out)
+                        out = out.rstrip()
+                        ec = res.get("exit_code")
+                        # native OWUI tool card (collapsible "View Result from <name>")
+                        yield {"content": tool_card(last_tool.get("name", "tool"), last_tool.get("args"), out, ec not in (None, 0))}
+                        last_tool = {}
+                    elif t == "error":
+                        msg = pay.get("message") if isinstance(pay, dict) else None
+                        yield {"content": f"\n\n_error: {str(msg or pay)[:400]}_"}
+                        break
+                    elif t == "message.complete":
+                        complete_text = pay.get("text", "")
+                        if not got_delta and complete_text:      # deltas missing -> use final text
+                            yield {"content": complete_text}
+                        u = pay.get("usage") or {}
+                        if u:
+                            yield {"usage": u}                    # #4 token usage
+                        completed = True
+                        break
+                except Exception as fe:
+                    traceback.print_exc()
+                    print(f"[owui-hermes] skipped bad frame: {fe!r}", flush=True)
+                    continue
         finally:
             # #3 client aborted (OWUI Stop) or errored -> best-effort cancel the Hermes turn.
             if sid and not completed:
@@ -545,10 +553,18 @@ class H(BaseHTTPRequestHandler):
             w(lambda: raw("data: [DONE]\n\n"))
         except (BrokenPipeError, ConnectionResetError):
             gen.close()
-        except Exception:
+        except Exception as e:
+            traceback.print_exc()
+            print(f"[owui-hermes] stream error: {e!r}", flush=True)   # never swallow silently
+            note = (f"\n\n_⚠️ adapter hiccup ({type(e).__name__}: {str(e)[:160]}). "
+                    f"Partial result is above — resend to continue._")
+            full[0] += note
             try:
-                send({"content": "\n_adapter error._"}, finish="stop")
-                raw("data: [DONE]\n\n")
+                w(lambda: send({"content": note}, finish="stop")); w(lambda: raw("data: [DONE]\n\n"))
+            except Exception:
+                pass
+            try:
+                mirror.done(full[0])   # preserve whatever was generated (FF)
             except Exception:
                 pass
         finally:

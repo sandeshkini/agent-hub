@@ -17,6 +17,7 @@ import os
 import queue
 import threading
 import time
+import traceback
 import urllib.request
 from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -208,38 +209,45 @@ def stream_turn(chat_id, model, messages):
             idle_deadline = time.monotonic() + IDLE_TIMEOUT
             if o.get("__eof__"):
                 break
-            typ = o.get("type")
-            props = o.get("properties", {}) or {}
-            if props.get("sessionID") != sid:
+            # Per-event processing is wrapped: a single malformed event is logged and SKIPPED
+            # instead of killing the whole turn.
+            try:
+                typ = o.get("type")
+                props = o.get("properties", {}) or {}
+                if props.get("sessionID") != sid:
+                    continue
+
+                if typ == "message.part.delta" and props.get("field") == "text":
+                    d = props.get("delta", "")
+                    if d:
+                        got_text = True
+                        yield {"content": d}
+
+                elif typ == "message.part.updated":
+                    part = props.get("part", {}) or {}
+                    if part.get("type") == "tool":
+                        pid = part.get("id") or part.get("callID") or ""
+                        name = part.get("tool") or part.get("name") or "tool"
+                        state = part.get("state", {}) or {}
+                        status = state.get("status") or part.get("status")
+                        if pid and pid not in seen_tools:
+                            seen_tools[pid] = True   # native card is self-labeled; no header line needed
+                        if pid and pid not in tool_done and status in ("completed", "error"):
+                            tool_done.add(pid)
+                            out = state.get("output") or ""
+                            if isinstance(out, (dict, list)):
+                                out = json.dumps(out)
+                            out = (out or "").strip()
+                            args = state.get("input") or state.get("args") or {}
+                            # native OWUI tool card (collapsible "View Result from <name>")
+                            yield {"content": tool_card(name, args, out, status == "error")}
+
+                elif typ == "session.idle":
+                    break
+            except Exception as ee:
+                traceback.print_exc()
+                print(f"[owui-opencode] skipped bad event: {ee!r}", flush=True)
                 continue
-
-            if typ == "message.part.delta" and props.get("field") == "text":
-                d = props.get("delta", "")
-                if d:
-                    got_text = True
-                    yield {"content": d}
-
-            elif typ == "message.part.updated":
-                part = props.get("part", {}) or {}
-                if part.get("type") == "tool":
-                    pid = part.get("id") or part.get("callID") or ""
-                    name = part.get("tool") or part.get("name") or "tool"
-                    state = part.get("state", {}) or {}
-                    status = state.get("status") or part.get("status")
-                    if pid and pid not in seen_tools:
-                        seen_tools[pid] = True   # native card is self-labeled; no header line needed
-                    if pid and pid not in tool_done and status in ("completed", "error"):
-                        tool_done.add(pid)
-                        out = state.get("output") or ""
-                        if isinstance(out, (dict, list)):
-                            out = json.dumps(out)
-                        out = (out or "").strip()
-                        args = state.get("input") or state.get("args") or {}
-                        # native OWUI tool card (collapsible "View Result from <name>")
-                        yield {"content": tool_card(name, args, out, status == "error")}
-
-            elif typ == "session.idle":
-                break
 
         # usage from the final message, if available
         msg = post_result.get("msg") or {}
@@ -375,9 +383,18 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             gen.close()
         except Exception as e:
+            traceback.print_exc()
+            print(f"[owui-opencode] stream error: {e!r}", flush=True)   # never swallow silently
+            note = (f"\n\n_⚠️ adapter hiccup ({type(e).__name__}: {str(e)[:160]}). "
+                    f"Partial result is above — resend to continue._")
+            full[0] += note
             try:
-                send({"content": f"\n_adapter error: {e}_"}, "stop")
+                send({"content": note}, "stop")
                 self.wfile.write(b"data: [DONE]\n\n")
+            except Exception:
+                pass
+            try:
+                mirror.done(full[0])   # preserve whatever was generated (FF)
             except Exception:
                 pass
         finally:

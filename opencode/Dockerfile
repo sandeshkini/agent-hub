@@ -5,7 +5,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       git ripgrep ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-RUN npm install -g opencode-ai@1.15.10 && npm cache clean --force
+RUN npm install -g opencode-ai@1.18.14 && npm cache clean --force
 
 WORKDIR /workspace
 ENV HOME=/root

@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 COPY package.json ./
 RUN npm install --omit=dev \
-    && npm install -g @anthropic-ai/claude-code@2.1.222 \
+    && npm install -g @anthropic-ai/claude-code@2.1.223 \
     && npm cache clean --force
 COPY server.mjs ./
 

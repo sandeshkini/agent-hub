@@ -3,7 +3,7 @@ OWUI chat message. OWUI forwards X-OpenWebUI-Chat-Id/-Message-Id/-User-Jwt; POST
 {content} to /api/v1/chats/{cid}/messages/{mid} both persists AND emits a live socket
 update, so a run's progress + result land in the chat whether or not a browser watches.
 No-op when the headers aren't present (e.g. a raw API call, not a real OWUI chat)."""
-import json, os, threading, time, urllib.request
+import glob, json, os, threading, time, urllib.request
 
 OWUI_BASE = os.getenv("OWUI_BASE", "http://open-webui:8080").rstrip("/")
 _MS = float(os.getenv("MIRROR_THROTTLE_MS", "1500")) / 1000.0
@@ -38,3 +38,71 @@ class Mirror:
         if not self.on:
             return
         self._post(content)  # final write, synchronous
+
+
+# ── FF4: durable mirrored runs ──
+# Persist each mirrored run so an adapter restart mid-run can re-issue it and still land the
+# result in the OWUI message. Guarded: if FF_STATE_DIR is unavailable, everything is a no-op.
+FF_DIR = os.getenv("FF_STATE_DIR", "/ffstate")
+try:
+    os.makedirs(FF_DIR, exist_ok=True)
+    FF_ON = True
+except Exception:
+    FF_ON = False
+
+
+def _ff_path(tag, cid, mid):
+    return os.path.join(FF_DIR, f"{tag}__{(cid + '|' + mid).encode().hex()}.json")
+
+
+def ff_write(tag, rec):
+    if not FF_ON:
+        return
+    try:
+        with open(_ff_path(tag, rec["cid"], rec["mid"]), "w") as f:
+            json.dump(rec, f)
+    except Exception:
+        pass
+
+
+def ff_clear(tag, cid, mid):
+    if not FF_ON or not (cid and mid):
+        return
+    try:
+        os.remove(_ff_path(tag, cid, mid))
+    except Exception:
+        pass
+
+
+def ff_recover(tag, run):
+    """On startup, re-issue runs interrupted by a restart. `run(rec)` yields text chunks;
+    we mirror the cumulative content into the original OWUI message, then drop the record."""
+    if not FF_ON:
+        return
+    for p in glob.glob(os.path.join(FF_DIR, f"{tag}__*.json")):
+        try:
+            rec = json.load(open(p))
+        except Exception:
+            try: os.remove(p)
+            except Exception: pass
+            continue
+        m = Mirror(rec.get("cid"), rec.get("mid"), rec.get("jwt"))
+        if not m.on:
+            try: os.remove(p)
+            except Exception: pass
+            continue
+        print(f"[{tag}] FF4: re-issuing interrupted run cid={rec.get('cid')}", flush=True)
+        full = "_↻ Auto-resumed after an adapter restart._\n\n"
+        try:
+            m.done(full)
+            for chunk in run(rec):
+                full += chunk
+                m.update(full)
+            m.done(full)
+        except Exception as e:
+            try:
+                m.done(full + f"\n\n_⚠️ Could not finish auto-resume ({str(e)[:120]}). Resend to retry._")
+            except Exception:
+                pass
+        try: os.remove(p)
+        except Exception: pass

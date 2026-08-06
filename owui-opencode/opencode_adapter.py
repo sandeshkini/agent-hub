@@ -20,7 +20,7 @@ import time
 import urllib.request
 from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from owui_mirror import Mirror
+from owui_mirror import Mirror, ff_write, ff_clear, ff_recover
 
 OC = os.getenv("OPENCODE_BASE", "http://opencode:4096").rstrip("/")
 ADAPTER_KEY = os.getenv("ADAPTER_KEY", "")
@@ -344,6 +344,9 @@ class Handler(BaseHTTPRequestHandler):
         mirror = Mirror(chat_id, self.headers.get("X-OpenWebUI-Message-Id"),
                         self.headers.get("X-OpenWebUI-User-Jwt"))
         gen = stream_turn(chat_id, model, messages)
+        if mirror.on:  # FF4: record the in-flight run so a restart can re-issue it
+            ff_write("opencode", {"cid": chat_id, "mid": mirror.mid, "jwt": mirror.jwt,
+                                  "model": model, "messages": messages})
         gone = [False]
         full = [""]
         def w(fn):
@@ -382,11 +385,21 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(b"data: [DONE]\n\n")
             except Exception:
                 pass
+        finally:
+            if mirror.on:  # FF4: run finished (or errored) → drop the durable record
+                ff_clear("opencode", chat_id, mirror.mid)
+
+
+def _ff_run(rec):  # FF4: re-issue an interrupted run; yield its text chunks
+    for d in stream_turn(rec["cid"], rec.get("model"), rec["messages"]):
+        if d.get("content"):
+            yield d["content"]
 
 
 def main():
     print(f"[owui-opencode] adapter on 0.0.0.0:{PORT} -> {OC} "
           f"(auth={'on' if ADAPTER_KEY else 'off'}, models={MODELS})", flush=True)
+    threading.Thread(target=lambda: ff_recover("opencode", _ff_run), daemon=True).start()
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
 
 

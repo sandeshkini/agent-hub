@@ -6,7 +6,7 @@
 // bash). Standalone — no dependency on the chat-agent / cm / dispatch.
 import http from "node:http";
 import { homedir } from "node:os";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync, readdirSync } from "node:fs";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 
 const PORT = Number(process.env.OWUI_CLAUDE_PORT || 9212);   // dedicated var — PORT may be polluted
@@ -130,7 +130,8 @@ async function* streamTurn(chatId, model, messages) {
             const f = "`".repeat(Math.max(3, (runs.length ? Math.max(...runs) : 0) + 1));
             block = f + "\n" + txt + "\n" + f + "\n";
           }
-          yield { content: block + (b.is_error ? "⚠️\n" : "✅\n") };
+          // trailing blank line so a following text delta starts a fresh markdown block (doesn't merge)
+          yield { content: block + (b.is_error ? "⚠️" : "✅") + "\n\n" };
         }
       } else if (m.type === "result") {
         if (m.session_id) cachePut(conv, m.session_id);
@@ -195,6 +196,40 @@ class Mirror {
   }
 }
 
+// ── FF4: durable mirrored runs ──
+// Persist each mirrored run to /ffstate (a bind-mounted volume). If the adapter is
+// killed mid-run (restart/reboot), the in-flight Claude generation dies — so on startup
+// we RE-ISSUE the stored turn and mirror the fresh output into the same OWUI message,
+// so the answer still lands. Everything is guarded; if /ffstate is unavailable, normal
+// streaming is unaffected.
+const FF_DIR = process.env.FF_STATE_DIR || "/ffstate";
+let FF_ON = false;
+try { mkdirSync(FF_DIR, { recursive: true }); FF_ON = true; } catch { FF_ON = false; }
+const ffFile = (cid, mid) => `${FF_DIR}/claude__${Buffer.from(`${cid}|${mid}`).toString("hex")}.json`;
+function ffWrite(rec) { if (!FF_ON) return; try { writeFileSync(ffFile(rec.cid, rec.mid), JSON.stringify(rec)); } catch {} }
+function ffClear(cid, mid) { if (!FF_ON) return; try { unlinkSync(ffFile(cid, mid)); } catch {} }
+async function recoverFF() {
+  if (!FF_ON) return;
+  let files = [];
+  try { files = readdirSync(FF_DIR).filter(f => f.startsWith("claude__") && f.endsWith(".json")); } catch { return; }
+  for (const f of files) {
+    const p = `${FF_DIR}/${f}`;
+    let rec; try { rec = JSON.parse(readFileSync(p, "utf8")); } catch { try { unlinkSync(p); } catch {} continue; }
+    const mirror = new Mirror(rec.cid, rec.mid, rec.jwt);
+    if (!mirror.on) { try { unlinkSync(p); } catch {} continue; }
+    console.log(`[owui-claude] FF4: re-issuing interrupted run cid=${rec.cid}`);
+    let full = "_↻ Auto-resumed after an adapter restart._\n\n";
+    try {
+      await mirror.done(full);
+      for await (const d of streamTurn(rec.cid, rec.model, rec.messages)) { if (d.content) { full += d.content; mirror.update(full); } }
+      await mirror.done(full);
+    } catch (e) {
+      try { await mirror.done(full + `\n\n_⚠️ Could not finish auto-resume (${String(e && e.message || e).slice(0, 120)}). Resend to retry._`); } catch {}
+    }
+    try { unlinkSync(p); } catch {}
+  }
+}
+
 function authed(req) { return !ADAPTER_KEY || req.headers["authorization"] === `Bearer ${ADAPTER_KEY}`; }
 function sendJson(res, code, obj) { const b = JSON.stringify(obj); res.writeHead(code, { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(b) }); res.end(b); }
 
@@ -229,6 +264,7 @@ const server = http.createServer((req, res) => {
     const send = (delta, finish = null) => res.write(`data: ${JSON.stringify({ id: cid, object: "chat.completion.chunk", created, model, choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`);
     const gen = streamTurn(chatId, model, messages);
     const mirror = new Mirror(chatId, req.headers["x-openwebui-message-id"], req.headers["x-openwebui-user-jwt"]);
+    if (mirror.on) ffWrite({ cid: chatId, mid: mirror.mid, jwt: mirror.jwt, model, messages, ts: Date.now() });
     let clientGone = false;
     // res "close" = the browser dropped (tab closed / Stop). If we're mirroring into
     // a real OWUI chat, DETACH: keep the run going and keep mirroring so the result
@@ -254,7 +290,9 @@ const server = http.createServer((req, res) => {
       await mirror.done(full);
       if (!clientGone) { send({}, "stop"); res.write("data: [DONE]\n\n"); }
     } catch { try { await mirror.done(full); } catch {} }
+    if (mirror.on) ffClear(chatId, mirror.mid);   // run finished → drop the durable record
     try { res.end(); } catch {}
   });
 });
-server.listen(PORT, "0.0.0.0", () => console.log(`[owui-claude] Agent-SDK adapter on 0.0.0.0:${PORT} (auth=${ADAPTER_KEY ? "on" : "off"}, workspace=${WORKSPACE})`));
+server.listen(PORT, "0.0.0.0", () => console.log(`[owui-claude] Agent-SDK adapter on 0.0.0.0:${PORT} (auth=${ADAPTER_KEY ? "on" : "off"}, workspace=${WORKSPACE}, ff4=${FF_ON ? "on" : "off"})`));
+recoverFF().catch(() => {});   // FF4: re-issue any runs interrupted by the last restart

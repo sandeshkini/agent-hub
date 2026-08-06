@@ -2,3 +2,4 @@
 *.log
 owui-claude/node_modules/
 owui-hermes/__pycache__/
+ff-state/

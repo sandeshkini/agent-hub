@@ -71,6 +71,9 @@ services:
       HERMES_DASH_PW: "${HERMES_DASH_PW}"
       ADAPTER_KEY: "${ADAPTER_KEY}"
       PORT: "9211"
+      FF_STATE_DIR: "/ffstate"
+    volumes:
+      - ./ff-state:/ffstate                      # FF4: durable mirrored-run registry
 
   owui-claude:
     build: ./owui-claude
@@ -83,9 +86,11 @@ services:
     # (no working_dir override — node runs server.mjs from /app; the AGENT's cwd is WORKSPACE below)
     volumes:
       - /home/beastblaster:/home/beastblaster   # full host home access (agents work on real files)
+      - ./ff-state:/ffstate                     # FF4: durable mirrored-run registry (survives restart)
     environment:
       CLAUDE_CODE_OAUTH_TOKEN: "${CLAUDE_CODE_OAUTH_TOKEN}"   # subscription OAuth (NOT ANTHROPIC_API_KEY)
       ADAPTER_KEY: "${ADAPTER_KEY}"
+      FF_STATE_DIR: "/ffstate"
       OWUI_CLAUDE_PORT: "9212"
       CLAUDE_MODELS: "${CLAUDE_MODELS}"
       CLAUDE_MODEL: "${CLAUDE_MODEL}"
@@ -119,6 +124,9 @@ services:
       ADAPTER_KEY: "${ADAPTER_KEY}"
       PORT: "9213"
       OPENCODE_MODELS: "${OPENCODE_MODELS}"
+      FF_STATE_DIR: "/ffstate"
+    volumes:
+      - ./ff-state:/ffstate                      # FF4: durable mirrored-run registry
     depends_on:
       - opencode
 

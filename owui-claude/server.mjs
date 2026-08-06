@@ -123,23 +123,24 @@ async function* streamTurn(chatId, model, messages) {
           txt = (txt || "").trim();
           const name = toolQueue.shift() || "tool";
           const mark = b.is_error ? "⚠️ error" : "✓";
-          const LIMIT = 1400;                     // keep tool dumps small; full run is on disk anyway
-          let more = 0;
-          if (txt.length > LIMIT) { more = txt.length - LIMIT; txt = txt.slice(0, LIMIT); }
           let out;
           if (txt) {
-            const nlines = txt.split("\n").length;
-            // Render tool output as an INERT, HTML-escaped <pre> inside <details> — NOT a markdown
-            // ``` fence. Markdown code fences are parity-fragile: a single stray/imbalanced ``` in any
-            // tool dump inverts every block after it (tool text spills out, prose gets sucked into a
-            // code box). Inside an HTML <pre>, backticks/``` are literal text and can't touch markdown.
-            let esc = txt.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-            esc = esc.replace(/\n[ \t]*\n+/g, "\n");   // a blank line would terminate the HTML block early
-            if (more) esc += `\n…(+${more} more chars truncated)`;
-            // Whole block on one line (no interior blank lines) so it stays a single HTML block.
-            out = `\n<details><summary>🔧 ${name} · ${nlines} line${nlines === 1 ? "" : "s"} ${mark}</summary><pre>${esc}</pre></details>\n\n`;
+            // Render tool output as a 4-SPACE-INDENTED code block. This is the one bulletproof option:
+            // it's plain markdown (OWUI renders it — unlike generic <details>/<pre> HTML, which OWUI
+            // shows as literal tags), and it uses NO ``` fences, so backticks/``` in the output are inert
+            // and can never invert the rest of the message (the fence-parity bug). Preview only, to
+            // avoid flooding the chat; the model narrates the details in prose.
+            const allLines = txt.split("\n");
+            const MAXL = 10, MAXC = 800;
+            let shown = allLines.slice(0, MAXL);
+            let truncated = allLines.length > MAXL;
+            let joined = shown.join("\n");
+            if (joined.length > MAXC) { joined = joined.slice(0, MAXC); truncated = true; }
+            const indented = joined.split("\n").map(l => "    " + l).join("\n");
+            const note = truncated ? `\n    … (${allLines.length} lines total — truncated)` : "";
+            out = `\n🔧 **${name}** · ${allLines.length} line${allLines.length === 1 ? "" : "s"} ${mark}\n\n${indented}${note}\n\n`;
           } else {
-            out = `🔧 ${name} ${mark}\n\n`;
+            out = `\n🔧 **${name}** ${mark}\n\n`;
           }
           yield { content: out };
         }

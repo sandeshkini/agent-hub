@@ -125,20 +125,20 @@ async function* streamTurn(chatId, model, messages) {
           const mark = b.is_error ? "⚠️ error" : "✓";
           let out;
           if (txt) {
-            // Render tool output as a 4-SPACE-INDENTED code block. This is the one bulletproof option:
-            // it's plain markdown (OWUI renders it — unlike generic <details>/<pre> HTML, which OWUI
-            // shows as literal tags), and it uses NO ``` fences, so backticks/``` in the output are inert
-            // and can never invert the rest of the message (the fence-parity bug). Preview only, to
-            // avoid flooding the chat; the model narrates the details in prose.
+            // Render tool output as a fenced ``` code block. VERIFIED via screenshot that OWUI renders
+            // fenced blocks (with Collapse/Copy chrome) — while indented-code renders as flowed prose
+            // here, and <details>/<pre>/<think> show as literal tags. To keep the fence bulletproof we
+            // NEUTRALIZE every backtick in the output (→ U+02BB, a look-alike) so nothing in the tool
+            // dump can ever close the fence early and invert the rest of the message (the parity bug).
             const allLines = txt.split("\n");
-            const MAXL = 10, MAXC = 800;
-            let shown = allLines.slice(0, MAXL);
-            let truncated = allLines.length > MAXL;
-            let joined = shown.join("\n");
-            if (joined.length > MAXC) { joined = joined.slice(0, MAXC); truncated = true; }
-            const indented = joined.split("\n").map(l => "    " + l).join("\n");
-            const note = truncated ? `\n    … (${allLines.length} lines total — truncated)` : "";
-            out = `\n🔧 **${name}** · ${allLines.length} line${allLines.length === 1 ? "" : "s"} ${mark}\n\n${indented}${note}\n\n`;
+            const total = allLines.length;
+            const MAXL = 12, MAXC = 1000;
+            let shown = allLines.slice(0, MAXL).join("\n");
+            let truncated = total > MAXL;
+            if (shown.length > MAXC) { shown = shown.slice(0, MAXC); truncated = true; }
+            shown = shown.replace(/`/g, "ʻ");           // fence-safe: no real backticks remain
+            if (truncated) shown += `\n… (${total} lines total — truncated)`;
+            out = `\n🔧 **${name}** · ${total} line${total === 1 ? "" : "s"} ${mark}\n\n\`\`\`\n${shown}\n\`\`\`\n\n`;
           } else {
             out = `\n🔧 **${name}** ${mark}\n\n`;
           }

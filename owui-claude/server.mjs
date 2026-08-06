@@ -129,15 +129,17 @@ async function* streamTurn(chatId, model, messages) {
           let out;
           if (txt) {
             const nlines = txt.split("\n").length;
-            // backtick-safe fence: one longer than any run inside, so embedded ``` can't break out
-            const runs = (txt.match(/`+/g) || []).map(x => x.length);
-            const f = "`".repeat(Math.max(3, (runs.length ? Math.max(...runs) : 0) + 1));
-            const body = f + "\n" + txt + (more ? `\n…(+${more} more chars truncated)` : "") + "\n" + f;
-            // Collapse tool activity into a foldable block so long dumps don't flood the chat.
-            // OWUI renders <details>; the blank line after </summary> lets the fenced code render inside.
-            out = `\n<details>\n<summary>🔧 <b>${name}</b> · ${nlines} line${nlines === 1 ? "" : "s"} ${mark}</summary>\n\n${body}\n\n</details>\n\n`;
+            // Render tool output as an INERT, HTML-escaped <pre> inside <details> — NOT a markdown
+            // ``` fence. Markdown code fences are parity-fragile: a single stray/imbalanced ``` in any
+            // tool dump inverts every block after it (tool text spills out, prose gets sucked into a
+            // code box). Inside an HTML <pre>, backticks/``` are literal text and can't touch markdown.
+            let esc = txt.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+            esc = esc.replace(/\n[ \t]*\n+/g, "\n");   // a blank line would terminate the HTML block early
+            if (more) esc += `\n…(+${more} more chars truncated)`;
+            // Whole block on one line (no interior blank lines) so it stays a single HTML block.
+            out = `\n<details><summary>🔧 ${name} · ${nlines} line${nlines === 1 ? "" : "s"} ${mark}</summary><pre>${esc}</pre></details>\n\n`;
           } else {
-            out = `🔧 <b>${name}</b> ${mark}\n\n`;
+            out = `🔧 ${name} ${mark}\n\n`;
           }
           yield { content: out };
         }

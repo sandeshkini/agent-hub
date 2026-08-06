@@ -2,7 +2,7 @@
 FROM python:3.11-slim
 
 WORKDIR /app
-COPY opencode_adapter.py ./
+COPY owui_mirror.py opencode_adapter.py ./
 
 ENV PORT=9213 PYTHONUNBUFFERED=1
 EXPOSE 9213

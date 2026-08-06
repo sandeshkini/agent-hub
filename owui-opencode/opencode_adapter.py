@@ -20,6 +20,7 @@ import time
 import urllib.request
 from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from owui_mirror import Mirror
 
 OC = os.getenv("OPENCODE_BASE", "http://opencode:4096").rstrip("/")
 ADAPTER_KEY = os.getenv("ADAPTER_KEY", "")
@@ -332,22 +333,42 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
             self.wfile.flush()
 
+        # native fire-and-forget: mirror into the OWUI chat; client disconnect DETACHES the run.
+        mirror = Mirror(chat_id, self.headers.get("X-OpenWebUI-Message-Id"),
+                        self.headers.get("X-OpenWebUI-User-Jwt"))
+        gen = stream_turn(chat_id, model, messages)
+        gone = [False]
+        full = [""]
+        def w(fn):
+            if gone[0]:
+                return
+            try:
+                fn()
+            except (BrokenPipeError, ConnectionResetError):
+                gone[0] = True
+        def _usage(u):
+            self.wfile.write(("data: " + json.dumps({"id": cid, "object": "chat.completion.chunk",
+                "created": created, "model": model, "choices": [], "usage": u}) + "\n\n").encode())
+            self.wfile.flush()
         try:
-            send({"role": "assistant"})
-            for d in stream_turn(chat_id, model, messages):
+            w(lambda: send({"role": "assistant"}))
+            for d in gen:
+                if gone[0] and not mirror.on:
+                    gen.close()
+                    break
                 if d.get("content"):
-                    send({"content": d["content"]})
+                    full[0] += d["content"]
+                    c = d["content"]
+                    w(lambda: send({"content": c}))
+                    mirror.update(full[0])
                 elif d.get("usage"):
                     u = _openai_usage(d["usage"])
-                    self.wfile.write(("data: " + json.dumps(
-                        {"id": cid, "object": "chat.completion.chunk", "created": created,
-                         "model": model, "choices": [], "usage": u}) + "\n\n").encode())
-                    self.wfile.flush()
-            send({}, "stop")
-            self.wfile.write(b"data: [DONE]\n\n")
-            self.wfile.flush()
+                    w(lambda: _usage(u))
+            mirror.done(full[0])
+            w(lambda: send({}, "stop"))
+            w(lambda: (self.wfile.write(b"data: [DONE]\n\n"), self.wfile.flush()))
         except (BrokenPipeError, ConnectionResetError):
-            pass
+            gen.close()
         except Exception as e:
             try:
                 send({"content": f"\n_adapter error: {e}_"}, "stop")

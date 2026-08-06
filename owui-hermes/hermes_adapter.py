@@ -29,6 +29,7 @@ import http.cookiejar
 from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from websockets.sync.client import connect as ws_connect
+from owui_mirror import Mirror
 
 BASE = os.getenv("HERMES_BASE", "http://127.0.0.1:9119")
 USER = os.getenv("HERMES_DASH_USER", "sandesh")
@@ -503,21 +504,41 @@ class H(BaseHTTPRequestHandler):
             raw(f"data: {json.dumps(chunk)}\n\n")
 
         gen = stream_turn(chat_id, messages)
+        # native fire-and-forget: mirror into the OWUI chat; a client disconnect
+        # DETACHES the run (keep consuming + mirroring) instead of aborting.
+        mirror = Mirror(chat_id, self.headers.get("X-OpenWebUI-Message-Id"),
+                        self.headers.get("X-OpenWebUI-User-Jwt"))
+        gone = [False]
+        full = [""]
+        def w(fn):
+            if gone[0]:
+                return
+            try:
+                fn()
+            except (BrokenPipeError, ConnectionResetError):
+                gone[0] = True                   # client left; keep running if mirroring
         try:
-            send({"role": "assistant"})
+            w(lambda: send({"role": "assistant"}))
             for d in gen:
+                if gone[0] and not mirror.on:
+                    gen.close()
+                    break                        # no chat to mirror to -> abort like before
                 if d.get("heartbeat"):
-                    raw(": ping\n\n")            # SSE comment; keeps the connection warm
+                    w(lambda: raw(": ping\n\n"))
                 elif d.get("usage"):
-                    raw("data: " + json.dumps({"id": cid, "object": "chat.completion.chunk",
-                        "created": created, "model": MODEL_ID, "choices": [],
-                        "usage": _openai_usage(d["usage"])}) + "\n\n")
+                    u = _openai_usage(d["usage"])
+                    w(lambda: raw("data: " + json.dumps({"id": cid, "object": "chat.completion.chunk",
+                        "created": created, "model": MODEL_ID, "choices": [], "usage": u}) + "\n\n"))
                 elif d.get("content"):
-                    send({"content": d["content"]})
-            send({}, finish="stop")
-            raw("data: [DONE]\n\n")
+                    full[0] += d["content"]
+                    c = d["content"]
+                    w(lambda: send({"content": c}))
+                    mirror.update(full[0])
+            mirror.done(full[0])
+            w(lambda: send({}, finish="stop"))
+            w(lambda: raw("data: [DONE]\n\n"))
         except (BrokenPipeError, ConnectionResetError):
-            gen.close()                          # client (OWUI) aborted -> stop consuming, close WS
+            gen.close()
         except Exception:
             try:
                 send({"content": "\n_adapter error._"}, finish="stop")

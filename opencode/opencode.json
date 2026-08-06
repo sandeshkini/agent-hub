@@ -1,5 +1,12 @@
 {
   "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "tools": {
+      "type": "remote",
+      "url": "http://mcp-tools:8000/mcp",
+      "enabled": true
+    }
+  },
   "permission": {
     "bash": {
       "*": "allow",

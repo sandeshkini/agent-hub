@@ -139,6 +139,27 @@ services:
     volumes:
       - ollama:/root/.ollama
 
+  # ONE shared MCP server: publish_artifact + notify tools for ALL agents (claude/hermes/opencode).
+  # Tool logic lives here; each agent points at it once. MCP tool calls render as native tool cards.
+  mcp-tools:
+    build: ./mcp-tools
+    image: agent-hub/mcp-tools
+    container_name: mcp-tools
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8009:8000"                    # host Hermes reaches http://127.0.0.1:8009/mcp
+    environment:
+      PORT: "8000"
+      ARTIFACTS_API: "http://artifacts:8080/api/publish"
+      PUBLIC_BASE: "https://apps.kingdomofluna.com"
+      PUBLISH_TOKEN: "${PUBLISH_TOKEN}"
+      NTFY_URL: "${NTFY_URL}"
+      NTFY_TOPIC: "${NTFY_TOPIC}"
+      NTFY_TOKEN: "${NTFY_TOKEN}"
+    networks:
+      - default                                  # owui-claude / opencode reach http://mcp-tools:8000/mcp
+      - apps                                      # reach artifacts board + ntfy
+
 volumes:
   open-webui:
     external: true          # reuse existing volume (preserves chat history)

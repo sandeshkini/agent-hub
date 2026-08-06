@@ -48,6 +48,10 @@ services:
       # Our adapters are plain chat endpoints (no OWUI-native tools), so default every model to
       # legacy → the web-search toggle actually fires. (Harmless for the adapters' internal tools.)
       DEFAULT_MODEL_PARAMS: '{"function_calling":"legacy"}'
+      # Global default metadata applied to EVERY model (connection models included; per-model
+      # overrides win). This makes the artifacts + notify tools always-on for all models without
+      # per-model config. Survives RESET_CONFIG_ON_START (reseeded from env each boot).
+      DEFAULT_MODEL_METADATA: '{"toolIds":["artifacts_board","notify"]}'
     depends_on:
       - owui-hermes
       - owui-claude

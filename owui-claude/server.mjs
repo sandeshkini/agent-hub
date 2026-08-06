@@ -140,6 +140,47 @@ function openaiUsage(u) {
 }
 
 // ── HTTP (OpenAI-compatible) ──
+// ── native fire-and-forget: mirror output into the OWUI chat message ──
+// OWUI forwards X-OpenWebUI-Chat-Id / -Message-Id / -User-Jwt. POSTing
+// {content} to /api/v1/chats/{cid}/messages/{mid} both persists AND emits a
+// live socket update, so a detached run's progress + result land in the chat
+// whether or not a browser is watching.
+const OWUI_BASE = process.env.OWUI_BASE || "http://open-webui:8080";
+const MIRROR_MS = Number(process.env.MIRROR_THROTTLE_MS || 1500);
+class Mirror {
+  constructor(cid, mid, jwt) {
+    this.cid = cid; this.mid = mid; this.jwt = jwt;
+    this.on = !!(cid && mid && jwt);
+    this.last = 0; this.pending = null; this.timer = null;
+  }
+  async _post(content) {
+    try {
+      await fetch(`${OWUI_BASE}/api/v1/chats/${this.cid}/messages/${this.mid}`, {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${this.jwt}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ content }),
+      });
+    } catch { /* OWUI unreachable — best-effort mirror */ }
+  }
+  update(content) {
+    if (!this.on) return;
+    this.pending = content;
+    const now = Date.now();
+    if (now - this.last > MIRROR_MS) { this.last = now; const c = this.pending; this.pending = null; this._post(c); }
+    else if (!this.timer) {
+      this.timer = setTimeout(() => {
+        this.timer = null; this.last = Date.now();
+        if (this.pending != null) { const c = this.pending; this.pending = null; this._post(c); }
+      }, MIRROR_MS);
+    }
+  }
+  async done(content) {
+    if (!this.on) return;
+    if (this.timer) { clearTimeout(this.timer); this.timer = null; }
+    await this._post(content);
+  }
+}
+
 function authed(req) { return !ADAPTER_KEY || req.headers["authorization"] === `Bearer ${ADAPTER_KEY}`; }
 function sendJson(res, code, obj) { const b = JSON.stringify(obj); res.writeHead(code, { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(b) }); res.end(b); }
 
@@ -173,24 +214,33 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" });
     const send = (delta, finish = null) => res.write(`data: ${JSON.stringify({ id: cid, object: "chat.completion.chunk", created, model, choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`);
     const gen = streamTurn(chatId, model, messages);
-    let aborted = false;
-    // Detect a real client disconnect (OWUI Stop button) via the RESPONSE connection.
-    // NOTE: req.on("close") is wrong here — in modern Node it fires as soon as the
-    // request BODY is fully read (right after "end"), which would abort every turn
-    // before it streams a single token. res "close" only fires when the client
-    // actually drops the connection; guard with writableFinished so our own res.end()
-    // (normal completion) isn't mistaken for an abort.
-    res.on("close", () => { if (!res.writableFinished) { aborted = true; if (gen.return) gen.return(); } });
+    const mirror = new Mirror(chatId, req.headers["x-openwebui-message-id"], req.headers["x-openwebui-user-jwt"]);
+    let clientGone = false;
+    // res "close" = the browser dropped (tab closed / Stop). If we're mirroring into
+    // a real OWUI chat, DETACH: keep the run going and keep mirroring so the result
+    // lands in the chat (native fire-and-forget). Without a mirror target, abort as
+    // before. (req.on("close") is wrong — it fires right after the body is read.)
+    res.on("close", () => {
+      if (res.writableFinished) return;
+      clientGone = true;
+      if (!mirror.on && gen.return) gen.return();   // no chat to mirror to → abort like before
+    });
+    let full = "";
     try {
       send({ role: "assistant" });
       for await (const d of gen) {
-        if (aborted) break;
-        if (d.usage) res.write(`data: ${JSON.stringify({ id: cid, object: "chat.completion.chunk", created, model, choices: [], usage: openaiUsage(d.usage) })}\n\n`);
-        else if (d.content) send({ content: d.content });
+        if (clientGone && !mirror.on) break;        // detached only when mirroring
+        if (d.usage) { if (!clientGone) { try { res.write(`data: ${JSON.stringify({ id: cid, object: "chat.completion.chunk", created, model, choices: [], usage: openaiUsage(d.usage) })}\n\n`); } catch { clientGone = true; } } }
+        else if (d.content) {
+          full += d.content;
+          if (!clientGone) { try { send({ content: d.content }); } catch { clientGone = true; } }
+          mirror.update(full);
+        }
       }
-      if (!aborted) { send({}, "stop"); res.write("data: [DONE]\n\n"); }
-    } catch { /* client gone */ }
-    res.end();
+      await mirror.done(full);
+      if (!clientGone) { send({}, "stop"); res.write("data: [DONE]\n\n"); }
+    } catch { try { await mirror.done(full); } catch {} }
+    try { res.end(); } catch {}
   });
 });
 server.listen(PORT, "0.0.0.0", () => console.log(`[owui-claude] Agent-SDK adapter on 0.0.0.0:${PORT} (auth=${ADAPTER_KEY ? "on" : "off"}, workspace=${WORKSPACE})`));

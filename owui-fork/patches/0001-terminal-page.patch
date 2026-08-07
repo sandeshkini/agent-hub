@@ -1,0 +1,1191 @@
+diff --git a/backend/open_webui/main.py b/backend/open_webui/main.py
+index 55613ac..8977f88 100644
+--- a/backend/open_webui/main.py
++++ b/backend/open_webui/main.py
+@@ -138,6 +138,8 @@ from open_webui.models.models import Models
+ from open_webui.models.users import Users
+ from open_webui.routers import (
+     analytics,
++    agent_inbox,  # LOCAL PATCH (agent-hub fork): inbox summaries
++    agent_nodes,  # LOCAL PATCH (agent-hub fork): multi-machine node registry (E4/E5)
+     audio,
+     auths,
+     automations,
+@@ -822,6 +824,8 @@ if ENABLE_ADMIN_ANALYTICS:
+ app.include_router(utils.router, prefix='/api/v1/utils', tags=['utils'])
+ app.include_router(terminals.router, prefix='/api/v1/terminals', tags=['terminals'])
+ app.include_router(automations.router, prefix='/api/v1/automations', tags=['automations'])
++app.include_router(agent_inbox.router, prefix='/api/inbox', tags=['inbox'])  # LOCAL PATCH
++app.include_router(agent_nodes.router, prefix='/api/nodes', tags=['nodes'])  # LOCAL PATCH
+ app.include_router(calendar.router, prefix='/api/v1/calendars', tags=['calendars'])
+ 
+ # SCIM 2.0 API for identity management
+diff --git a/backend/open_webui/routers/agent_inbox.py b/backend/open_webui/routers/agent_inbox.py
+new file mode 100644
+index 0000000..a6f3cca
+--- /dev/null
++++ b/backend/open_webui/routers/agent_inbox.py
+@@ -0,0 +1,117 @@
++# LOCAL PATCH (agent-hub fork): E2 Inbox with real-time smart summaries.
++# Returns the user's chat list (same snippet/active/unread data as OWUI's list) with a one-line
++# LLM summary attached per chat. Summaries are cached and regenerated ONLY when a chat changes
++# (updated_at), in the background (bounded concurrency), via the local Ollama model — so the /inbox
++# page can poll this cheaply and watch summaries update live. Additive: new router, own prefix.
++import asyncio
++import os
++
++import aiohttp
++from fastapi import APIRouter, Depends, Request
++from sqlalchemy.ext.asyncio import AsyncSession
++
++from open_webui.internal.db import get_async_session
++from open_webui.models.chats import Chats
++from open_webui.routers.chats import add_active_state_to_chat_list
++from open_webui.utils.auth import get_verified_user
++
++router = APIRouter()
++
++OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://ollama:11434").rstrip("/")
++SUMMARY_MODEL = os.environ.get("INBOX_SUMMARY_MODEL", "llama3.2:3b")
++
++_summaries: dict = {}          # chat_id -> {"updated_at": int, "summary": str}
++_inflight: set = set()
++_sema = asyncio.Semaphore(2)   # cap concurrent CPU summarizations
++
++
++def _messages_text(chat_obj) -> str:
++    try:
++        data = getattr(chat_obj, "chat", None) or {}
++        hist = ((data or {}).get("history") or {}).get("messages") or {}
++        msgs = [m for m in hist.values() if isinstance(m, dict)]
++        msgs.sort(key=lambda m: m.get("timestamp") or 0)
++        lines = []
++        for m in msgs[-8:]:
++            c = (m.get("content") or "").strip()
++            if c:
++                lines.append(f"{m.get('role', '?')}: {c[:400]}")
++        return "\n".join(lines)
++    except Exception:
++        return ""
++
++
++async def _generate_summary(text: str):
++    prompt = (
++        "In 4 to 8 words, write a concise title describing what this conversation is about. "
++        "Output ONLY the title — no quotes, no trailing period.\n\nConversation:\n"
++        + text[:4000]
++        + "\n\nTitle:"
++    )
++    try:
++        async with aiohttp.ClientSession() as s:
++            async with s.post(
++                f"{OLLAMA_BASE_URL}/api/generate",
++                json={
++                    "model": SUMMARY_MODEL,
++                    "prompt": prompt,
++                    "stream": False,
++                    "options": {"num_predict": 24, "temperature": 0.2},
++                },
++                timeout=aiohttp.ClientTimeout(total=45),
++            ) as r:
++                d = await r.json()
++                out = (d.get("response") or "").strip().strip('"').strip()
++                out = out.split("\n")[0].strip()[:90]
++                return out or None
++    except Exception:
++        return None
++
++
++async def _regen(chat_id: str, updated_at: int):
++    try:
++        async with _sema:
++            chat = await Chats.get_chat_by_id(chat_id)  # manages its own session
++            if chat is None:
++                return
++            text = _messages_text(chat)
++            if not text:
++                return
++            summary = await _generate_summary(text)
++            if summary:
++                _summaries[chat_id] = {"updated_at": updated_at, "summary": summary}
++    finally:
++        _inflight.discard(chat_id)
++
++
++@router.get("/")
++async def get_inbox(
++    request: Request,
++    user=Depends(get_verified_user),
++    db: AsyncSession = Depends(get_async_session),
++):
++    chats = await Chats.get_chat_title_id_list_by_user_id(
++        user.id,
++        include_folders=True,
++        include_pinned=True,
++        sort_by="updated_at",
++        sort_dir="desc",
++        skip=0,
++        limit=40,
++        db=db,
++    )
++    chats = await add_active_state_to_chat_list(request, chats)
++
++    out = []
++    for c in chats:
++        item = c.model_dump() if hasattr(c, "model_dump") else dict(c)
++        cid = item.get("id")
++        ua = item.get("updated_at")
++        cached = _summaries.get(cid)
++        # (re)generate in the background when missing or the chat changed since the cached summary
++        if (cached is None or cached.get("updated_at") != ua) and cid not in _inflight:
++            _inflight.add(cid)
++            asyncio.create_task(_regen(cid, ua))
++        item["summary"] = (cached or {}).get("summary")
++        out.append(item)
++    return out
+diff --git a/backend/open_webui/routers/agent_nodes.py b/backend/open_webui/routers/agent_nodes.py
+new file mode 100644
+index 0000000..eed014f
+--- /dev/null
++++ b/backend/open_webui/routers/agent_nodes.py
+@@ -0,0 +1,112 @@
++# LOCAL PATCH (agent-hub fork): E4/E5 multi-machine node registry.
++# A faithful port of the `dispatch` hub into the OWUI backend. Each machine ("node") runs an
++# agent-hub-node bundle (adapter fleet + owui-terminal) that self-registers here on a heartbeat.
++# The registry is IN-MEMORY and stateless — rebuilt from heartbeats, exactly like dispatch:
++#   - node id = sha256(url)[:8]  (stable, deterministic)
++#   - register/heartbeat: POST /api/nodes/register  (Bearer NODE_HUB_TOKEN, machine-to-machine)
++#   - list:               GET  /api/nodes/          (browser JWT) -> nodes + computed online flag
++#   - liveness: online when last_seen <= 90s; evicted when last_seen > 1h (computed lazily on access)
++# The machine selector (frontend) reads GET /api/nodes/ to scope the model list + terminal target.
++import hashlib
++import os
++import time
++
++from fastapi import APIRouter, Depends, HTTPException, Request
++
++from open_webui.utils.auth import get_verified_user
++
++router = APIRouter()
++
++# Shared machine-to-machine secret for register/heartbeat. If unset, registration is open
++# (single-host/dev). Set NODE_HUB_TOKEN in the OWUI env to require it in production.
++NODE_HUB_TOKEN = os.environ.get("NODE_HUB_TOKEN", "").strip()
++
++OFFLINE_TTL = 90        # seconds without a heartbeat -> shown offline
++EVICT_TTL = 3600        # seconds without a heartbeat -> dropped from the registry
++
++# id -> node dict. Fields:
++#   id, label, url, api_url, token, capabilities[], models[], terminal(dict|None),
++#   version, registered_at, last_seen
++_nodes: dict = {}
++
++
++def _node_id(url: str) -> str:
++    return hashlib.sha256((url or "").encode()).hexdigest()[:8]
++
++
++def _bearer(request: Request) -> str:
++    h = request.headers.get("authorization", "")
++    return h[7:].strip() if h.lower().startswith("bearer ") else ""
++
++
++def _prune(now: float | None = None) -> None:
++    now = now or time.time()
++    for nid in [k for k, v in _nodes.items() if now - v.get("last_seen", 0) > EVICT_TTL]:
++        _nodes.pop(nid, None)
++
++
++def _view(n: dict, now: float) -> dict:
++    # Never leak the node token to browsers; expose an `online` flag instead of raw last_seen math.
++    return {
++        "id": n["id"],
++        "label": n.get("label") or n["id"],
++        "url": n.get("url"),
++        "api_url": n.get("api_url") or n.get("url"),
++        "capabilities": n.get("capabilities") or [],
++        "models": n.get("models") or [],
++        "terminal": n.get("terminal"),
++        "version": n.get("version"),
++        "online": (now - n.get("last_seen", 0)) <= OFFLINE_TTL,
++        "last_seen": int(n.get("last_seen", 0)),
++        "registered_at": int(n.get("registered_at", 0)),
++    }
++
++
++@router.post("/register")
++async def register_node(request: Request):
++    if NODE_HUB_TOKEN and _bearer(request) != NODE_HUB_TOKEN:
++        raise HTTPException(status_code=401, detail="bad node hub token")
++    try:
++        body = await request.json()
++    except Exception:
++        raise HTTPException(status_code=400, detail="invalid json")
++
++    url = (body.get("url") or "").strip()
++    if not url:
++        raise HTTPException(status_code=400, detail="url is required")
++
++    now = time.time()
++    nid = _node_id(url)
++    existing = _nodes.get(nid) or {}
++    _nodes[nid] = {
++        "id": nid,
++        "label": body.get("label") or existing.get("label") or nid,
++        "url": url,
++        "api_url": (body.get("api_url") or "").strip() or url,
++        "token": body.get("token") or existing.get("token") or "",
++        "capabilities": body.get("capabilities") or [],
++        "models": body.get("models") or [],
++        "terminal": body.get("terminal"),
++        "version": body.get("version"),
++        "registered_at": existing.get("registered_at") or now,
++        "last_seen": now,
++    }
++    _prune(now)
++    return {"id": nid, "status": "registered"}
++
++
++@router.get("/")
++async def list_nodes(user=Depends(get_verified_user)):
++    now = time.time()
++    _prune(now)
++    nodes = [_view(n, now) for n in _nodes.values()]
++    nodes.sort(key=lambda x: (not x["online"], x["label"].lower()))
++    return nodes
++
++
++@router.delete("/{node_id}")
++async def delete_node(node_id: str, user=Depends(get_verified_user)):
++    if (getattr(user, "role", None) or "") != "admin":
++        raise HTTPException(status_code=403, detail="admin only")
++    existed = _nodes.pop(node_id, None) is not None
++    return {"deleted": existed}
+diff --git a/src/lib/components/chat/Chat.svelte b/src/lib/components/chat/Chat.svelte
+index 87a4029..29bd058 100644
+--- a/src/lib/components/chat/Chat.svelte
++++ b/src/lib/components/chat/Chat.svelte
+@@ -1133,6 +1133,7 @@
+ 				}
+ 
+ 				history.messages[event.message_id] = message;
++				stashStreamingContent(event.chat_id, message); // LOCAL PATCH (#70)
+ 			}
+ 		} else {
+ 			// Non-active chat completion: queue stays in the global store.
+@@ -1939,6 +1940,43 @@
+ 		setTimeout(() => chatInput?.focus(), 0);
+ 	};
+ 
++	// LOCAL PATCH (agent-hub fork, #70): keep an actively-streaming assistant message visible across
++	// navigation. The DB snapshot lags the server-side mirror throttle (~1.5s), so returning to a chat
++	// mid-stream could briefly show a shorter/blank message ("everything I saw is gone, only see what's
++	// next"). We stash the fullest streamed content per chat in sessionStorage and restore it on loadChat
++	// when it's longer than the DB copy — never shrinks, never touches a finished message. For our
++	// replace-based adapters this is exact; the next mirror event re-syncs regardless.
++	const streamStashKey = (cid) => `owui:stream:${cid}`;
++	const stashStreamingContent = (cid, msg) => {
++		if (typeof sessionStorage === 'undefined' || !cid || !msg || msg.role !== 'assistant') return;
++		try {
++			const key = streamStashKey(cid);
++			if (!msg.done && (msg.content ?? '') !== '') {
++				sessionStorage.setItem(key, JSON.stringify({ id: msg.id, content: msg.content }));
++			} else if (msg.done) {
++				sessionStorage.removeItem(key);
++			}
++		} catch (e) {}
++	};
++	const restoreStreamingContent = (cid) => {
++		if (typeof sessionStorage === 'undefined' || !cid) return;
++		try {
++			const raw = sessionStorage.getItem(streamStashKey(cid));
++			if (!raw) return;
++			const stash = JSON.parse(raw);
++			const m = stash?.id ? history?.messages?.[stash.id] : null;
++			if (
++				m &&
++				m.role === 'assistant' &&
++				!m.done &&
++				typeof stash.content === 'string' &&
++				stash.content.length > (m.content ?? '').length
++			) {
++				m.content = stash.content;
++			}
++		} catch (e) {}
++	};
++
+ 	const loadChat = async () => {
+ 		noteChatDebug('loadChat start');
+ 		// chatIdProp is empty for chats started from the home page (URL set via replaceState)
+@@ -2019,6 +2057,9 @@
+ 				// nodes from failed regenerations (#24424, #24157, #20474)
+ 				sanitizeHistory(history);
+ 
++				// LOCAL PATCH (#70): if a stream was in flight, restore the fullest content we showed.
++				restoreStreamingContent($chatId);
++
+ 				chatTitle.set(chatContent.title);
+ 
+ 				params = structuredClone(chatContent?.params ?? {});
+@@ -3138,7 +3179,12 @@
+ 				filter_ids: selectedFilterIds.length > 0 ? selectedFilterIds : undefined,
+ 				tool_ids: toolIds.length > 0 ? toolIds : undefined,
+ 				skill_ids: skillIds.length > 0 ? skillIds : undefined,
+-				terminal_id: terminalEnabled ? (activeTerminalId ?? undefined) : undefined,
++				// LOCAL PATCH (agent-hub fork): never attach a terminal to chat completions. Our fork
++				// uses a dedicated /terminal page (not OWUI's terminal-tools-in-chat), and our owui-terminal
++				// is a bare PTY server — not a terminal-TOOLS provider — so probing it 503s every message
++				// ("Terminal server 'aibo' is unavailable"). selectedTerminalId still drives XTerminal/FileNav
++				// on the /terminal page; it just must not leak into completions.
++				terminal_id: undefined,
+ 				tool_servers: [
+ 					...($toolServers ?? []).filter(
+ 						(server, idx) => toolServerIds.includes(idx) || toolServerIds.includes(server?.id)
+diff --git a/src/lib/components/chat/MessageInput.svelte b/src/lib/components/chat/MessageInput.svelte
+index 883bdba..32be20f 100644
+--- a/src/lib/components/chat/MessageInput.svelte
++++ b/src/lib/components/chat/MessageInput.svelte
+@@ -2228,7 +2228,7 @@
+ 													$_user?.role === 'admin' ||
+ 													($_user?.permissions?.features?.direct_tool_servers ?? true)}
+ 												{#if terminalCapableModels.length > 0 && (($terminalServers ?? []).some((t) => t.id) || (hasDirectToolServerAccess && (($terminalServers ?? []).some((t) => !t.id) || ($settings?.terminalServers ?? []).some((s) => s.url))))}
+-													<TerminalMenu bind:show={showTerminalMenu} />
++													<!-- LOCAL PATCH (agent-hub fork): chat terminal-server (cloud) menu removed; use the dedicated sidebar Terminal instead. -->
+ 												{/if}
+ 											{/if}
+ 										</div>
+diff --git a/src/lib/components/chat/ModelSelector/Selector.svelte b/src/lib/components/chat/ModelSelector/Selector.svelte
+index 28654d6..7bec24d 100644
+--- a/src/lib/components/chat/ModelSelector/Selector.svelte
++++ b/src/lib/components/chat/ModelSelector/Selector.svelte
+@@ -28,6 +28,7 @@
+ 	import { toast } from 'svelte-sonner';
+ 	import { capitalizeFirstLetter, sanitizeResponseContent, splitStream } from '$lib/utils';
+ 	import { getModels } from '$lib/apis';
++	import { selectedNodeModelIds } from '$lib/utils/machineSelector'; // LOCAL PATCH (E4): machine scope
+ 
+ 	import ChevronDown from '$lib/components/icons/ChevronDown.svelte';
+ 	import Check from '$lib/components/icons/Check.svelte';
+@@ -317,7 +318,10 @@
+ 							return item.model?.direct;
+ 						}
+ 					})
+-	).filter((item) => includeHidden || !(item.model?.info?.meta?.hidden ?? false));
++	)
++		.filter((item) => includeHidden || !(item.model?.info?.meta?.hidden ?? false))
++		// LOCAL PATCH (E4): when a machine is selected, show only that machine's models.
++		.filter((item) => !$selectedNodeModelIds || $selectedNodeModelIds.has(item.model?.id));
+ 
+ 	$: if (
+ 		selectedTag !== undefined ||
+diff --git a/src/lib/components/chat/XTerminal.svelte b/src/lib/components/chat/XTerminal.svelte
+index ce1eda9..d42ae3d 100644
+--- a/src/lib/components/chat/XTerminal.svelte
++++ b/src/lib/components/chat/XTerminal.svelte
+@@ -1,5 +1,5 @@
+ <script lang="ts">
+-	import { onMount, onDestroy, getContext } from 'svelte';
++	import { onMount, onDestroy, getContext, createEventDispatcher } from 'svelte';
+ 	import { Terminal } from '@xterm/xterm';
+ 	import { FitAddon } from '@xterm/addon-fit';
+ 	import { WebLinksAddon } from '@xterm/addon-web-links';
+@@ -10,9 +10,11 @@
+ 	import Tooltip from '$lib/components/common/Tooltip.svelte';
+ 
+ 	const i18n = getContext('i18n');
++	const dispatch = createEventDispatcher(); // LOCAL PATCH
+ 
+ 	export let overlay = false;
+ 	export let chatId: string | null = null;
++	export let fontSize = 13; // LOCAL PATCH: adjustable
+ 
+ 	let terminalEl: HTMLDivElement;
+ 	let term: Terminal | null = null;
+@@ -23,6 +25,11 @@
+ 	let resizeObserver: ResizeObserver | null = null;
+ 	let pingInterval: ReturnType<typeof setInterval> | null = null;
+ 
++	// LOCAL PATCH: live-update font size + refit
++	$: if (term && fontSize) {
++		try { (term as any).options.fontSize = fontSize; fitAddon?.fit(); } catch (e) {}
++	}
++
+ 	// Resolve the active terminal server's info for the WebSocket URL
+ 	const getTerminalInfo = (): { serverId: string; baseUrl: string } | null => {
+ 		// System terminal (admin-configured, has an `id`)
+@@ -173,7 +180,7 @@
+ 
+ 		term = new Terminal({
+ 			cursorBlink: true,
+-			fontSize: 13,
++			fontSize,
+ 			fontFamily:
+ 				"'JetBrains Mono', 'Fira Code', 'Cascadia Code', Menlo, Monaco, 'Courier New', monospace",
+ 			theme: {
+@@ -209,6 +216,8 @@
+ 		term.loadAddon(new WebLinksAddon());
+ 
+ 		term.open(terminalEl);
++		// LOCAL PATCH: surface the terminal's OSC title (cwd/command) to the parent
++		try { term.onTitleChange((t) => dispatch('title', t)); } catch (e) {}
+ 
+ 		// Fit after a frame so the container has dimensions
+ 		requestAnimationFrame(() => {
+diff --git a/src/lib/components/layout/Sidebar.svelte b/src/lib/components/layout/Sidebar.svelte
+index f8ac62b..3d8fd58 100644
+--- a/src/lib/components/layout/Sidebar.svelte
++++ b/src/lib/components/layout/Sidebar.svelte
+@@ -74,6 +74,7 @@
+ 	import { getChannels, createNewChannel } from '$lib/apis/channels';
+ 	import ChannelModal from './Sidebar/ChannelModal.svelte';
+ 	import ChannelItem from './Sidebar/ChannelItem.svelte';
++	import { terminalSessions, activeTerminalId, newTerminalSession, closeTerminalSession } from '$lib/utils/agentTerminals'; // LOCAL PATCH
+ 	import SearchModal from './SearchModal.svelte';
+ 	import FolderModal from './Sidebar/Folders/FolderModal.svelte';
+ 	import PinnedModelList from './Sidebar/PinnedModelList.svelte';
+@@ -83,6 +84,9 @@
+ 	import CodeIcon from './Sidebar/icons/Code.svelte';
+ 	import EditPencilIcon from './Sidebar/icons/EditPencil.svelte';
+ 	import NotesIcon from './Sidebar/icons/Notes.svelte';
++	import TerminalIcon from '$lib/components/icons/CommandLine.svelte'; // LOCAL PATCH
++	import InboxIcon from '$lib/components/icons/ArchiveBox.svelte'; // LOCAL PATCH: fork terminal
++	import MachineSelector from './Sidebar/MachineSelector.svelte'; // LOCAL PATCH (E4): machine selector
+ 	import SearchIcon from './Sidebar/icons/Search.svelte';
+ 	import Sidebar from '../icons/Sidebar.svelte';
+ 	import WorkspaceIcon from './Sidebar/icons/Workspace.svelte';
+@@ -94,7 +98,7 @@
+ 	import MoreHorizontalIcon from './Sidebar/icons/MoreHorizontal.svelte';
+ 
+ 	const BREAKPOINT = 768;
+-	const DEFAULT_PINNED_ITEMS = ['notes', 'workspace'];
++	const DEFAULT_PINNED_ITEMS = ['inbox', 'notes', 'workspace', 'terminal']; // LOCAL PATCH
+ 
+ 	let scrollTop = 0;
+ 
+@@ -125,6 +129,7 @@
+ 	let showPinnedModels = false;
+ 	let showPinnedNotes = false;
+ 	let showChannels = false;
++	let showTerminals = true; // LOCAL PATCH
+ 	let showFolders = false;
+ 	let showSharedFolders = false;
+ 	let showChatsMenu = false;
+@@ -175,6 +180,9 @@
+ 				);
+ 			case 'playground':
+ 				return $user?.role === 'admin';
++			case 'terminal': // LOCAL PATCH
++			case 'inbox': // LOCAL PATCH
++				return true;
+ 			default:
+ 				return false;
+ 		}
+@@ -182,8 +190,10 @@
+ 
+ 	const getMenuItemMeta = (id) => {
+ 		const items = {
++			inbox: { label: 'Inbox', href: '/inbox', iconType: 'inbox' }, // LOCAL PATCH
+ 			notes: { label: 'Notes', href: '/notes', iconType: 'note' },
+ 			workspace: { label: 'Workspace', href: '/workspace', iconType: 'workspace' },
++			terminal: { label: 'Terminal', href: '/terminal', iconType: 'terminal' }, // LOCAL PATCH
+ 			automations: { label: 'Automations', href: '/automations', iconType: 'automations' },
+ 			calendar: { label: 'Calendar', href: '/calendar', iconType: 'calendar' },
+ 			playground: { label: 'Playground', href: '/playground', iconType: 'playground' }
+@@ -193,6 +203,8 @@
+ 
+ 	const menuItemPathPrefixes = {
+ 		notes: '/notes',
++		terminal: '/terminal', // LOCAL PATCH
++		inbox: '/inbox', // LOCAL PATCH
+ 		workspace: '/workspace',
+ 		calendar: '/calendar',
+ 		automations: '/automations',
+@@ -1014,6 +1026,7 @@
+ 					</Tooltip>
+ 				</div>
+ 
++
+ 				{#each pinnedItems as itemId (itemId)}
+ 					{@const meta = getMenuItemMeta(itemId)}
+ 					{#if meta && isMenuItemVisible(itemId)}
+@@ -1049,6 +1062,10 @@
+ 											<CalendarIcon className="size-4" strokeWidth="1.5" />
+ 										{:else if itemId === 'playground'}
+ 											<CodeIcon className="size-4" strokeWidth="1.5" />
++										{:else if itemId === 'terminal'}
++											<TerminalIcon className="size-4" strokeWidth="1.5" />
++										{:else if itemId === 'inbox'}
++											<InboxIcon className="size-4" strokeWidth="1.5" />
+ 										{/if}
+ 									</div>
+ 								</a>
+@@ -1259,6 +1276,10 @@
+ 												<CalendarIcon className="size-4" strokeWidth="1.5" />
+ 											{:else if itemId === 'playground'}
+ 												<CodeIcon className="size-4" strokeWidth="1.5" />
++											{:else if itemId === 'terminal'}
++												<TerminalIcon className="size-4" strokeWidth="1.5" />
++											{:else if itemId === 'inbox'}
++												<InboxIcon className="size-4" strokeWidth="1.5" />
+ 											{/if}
+ 										</div>
+ 
+@@ -1272,6 +1293,9 @@
+ 					</div>
+ 				</div>
+ 
++				<!-- LOCAL PATCH (E4): machine selector — scopes model list + terminal target -->
++				<MachineSelector />
++
+ 				{#if ($models ?? []).length > 0 && (($settings?.pinnedModels ?? []).length > 0 || $config?.default_pinned_models)}
+ 					<SidebarSection
+ 						id="sidebar-models"
+@@ -1337,6 +1361,27 @@
+ 					</SidebarSection>
+ 				{/if}
+ 
++				<!-- LOCAL PATCH (agent-hub fork): terminal sessions in the sidebar (inbox-ready) -->
++				<SidebarSection
++					id="sidebar-terminals"
++					bind:open={showTerminals}
++					className="mt-0.5"
++					name={$i18n.t('Terminals')}
++					dragAndDrop={false}
++					onAdd={() => { newTerminalSession(); goto('/terminal'); itemClickHandler(); }}
++					onAddLabel={$i18n.t('New Terminal')}
++				>
++					{#each $terminalSessions as t (t.id)}
++						<div class="group w-full flex justify-between items-center rounded-xl px-2 py-[6px] {$activeTerminalId === t.id ? 'bg-black/[0.035] dark:bg-white/[0.045]' : 'hover:bg-gray-50 dark:hover:bg-gray-900'}">
++							<a class="flex items-center gap-2 flex-1 min-w-0 cursor-pointer" href="/terminal" on:click={(e) => { e.preventDefault(); activeTerminalId.set(t.id); goto('/terminal'); itemClickHandler(); }}>
++								<div class="size-1.5 shrink-0 rounded-full bg-green-500" title={$i18n.t('Running')}></div>
++								<div class="text-left overflow-hidden w-full h-[20px] truncate">{t.name}</div>
++							</a>
++							<button class="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-red-500 transition px-1 shrink-0" title={$i18n.t('Close')} on:click|stopPropagation={() => closeTerminalSession(t.id)}>✕</button>
++						</div>
++					{/each}
++				</SidebarSection>
++				
+ 				{#if $config?.features?.enable_folders && ($user?.role === 'admin' || ($user?.permissions?.features?.folders ?? true))}
+ 					<SidebarSection
+ 						id="sidebar-folders"
+diff --git a/src/lib/components/layout/Sidebar/ChatItem.svelte b/src/lib/components/layout/Sidebar/ChatItem.svelte
+index 3e9602b..7ed88d4 100644
+--- a/src/lib/components/layout/Sidebar/ChatItem.svelte
++++ b/src/lib/components/layout/Sidebar/ChatItem.svelte
+@@ -18,6 +18,7 @@
+ 	import { toast } from 'svelte-sonner';
+ 	import { goto, invalidate, invalidateAll } from '$app/navigation';
+ 	import { onMount, getContext, createEventDispatcher, tick } from 'svelte';
++	import { chatSummaries } from '$lib/utils/agentInbox'; // LOCAL PATCH
+ 	import { LinkPreview } from 'bits-ui';
+ 	import {
+ 		archiveChatById,
+@@ -608,13 +609,18 @@
+ 							<div class="size-1.5 bg-sky-500 rounded-full"></div>
+ 						</div>
+ 					{/if}
+-					<div
+-						dir="auto"
+-						class="text-left self-center overflow-hidden w-full h-[20px] truncate {unread
+-							? 'font-normal text-gray-800 dark:text-gray-200'
+-							: ''} {showInlineActions && !readonly ? 'pr-12' : ''}"
+-					>
+-						{title}
++					<div class="flex flex-col flex-1 min-w-0 justify-center">  <!-- LOCAL PATCH: title + summary -->
++						<div
++							dir="auto"
++							class="text-left overflow-hidden w-full truncate {unread
++								? 'font-normal text-gray-800 dark:text-gray-200'
++								: ''} {showInlineActions && !readonly ? 'pr-12' : ''}"
++						>
++							{title}
++						</div>
++						{#if $chatSummaries[id]}
++							<div class="text-xs text-gray-400 dark:text-gray-500 truncate leading-tight">{$chatSummaries[id]}</div>
++						{/if}
+ 					</div>
+ 				</div>
+ 
+diff --git a/src/lib/components/layout/Sidebar/MachineSelector.svelte b/src/lib/components/layout/Sidebar/MachineSelector.svelte
+new file mode 100644
+index 0000000..8efbd67
+--- /dev/null
++++ b/src/lib/components/layout/Sidebar/MachineSelector.svelte
+@@ -0,0 +1,69 @@
++<script lang="ts">
++	// LOCAL PATCH (agent-hub fork, E4): machine selector. Picks a registered node → scopes the chat
++	// model list (via selectedNodeModelIds) AND the /terminal target (selectMachine sets selectedTerminalId).
++	// Renders only when the node registry has ≥1 machine, so single-host installs see no change until a
++	// node registers. Styled to match sidebar rows (OWUI design language kept intact).
++	import { getContext } from 'svelte';
++	import { nodes, selectedNodeId, selectedNode, selectMachine } from '$lib/utils/machineSelector';
++
++	const i18n = getContext('i18n');
++	let open = false;
++
++	const pick = (id: string | null) => {
++		selectMachine(id);
++		open = false;
++	};
++</script>
++
++{#if ($nodes ?? []).length > 0}
++	<div class="px-1 relative">
++		<button
++			class="w-full flex items-center gap-2 px-2 py-[6px] rounded-lg text-[13px] hover:bg-gray-100 dark:hover:bg-gray-900 transition"
++			on:click={() => (open = !open)}
++			aria-haspopup="listbox"
++			aria-expanded={open}
++			title={$i18n.t('Machine')}
++		>
++			<!-- server/desktop glyph -->
++			<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.7"
++				stroke="currentColor" class="size-4 shrink-0 text-gray-500">
++				<path stroke-linecap="round" stroke-linejoin="round"
++					d="M9 17.25v1.007a3 3 0 0 1-.879 2.122L7.5 21h9l-.621-.621A3 3 0 0 1 15 18.257V17.25m6-12V15a2.25 2.25 0 0 1-2.25 2.25H5.25A2.25 2.25 0 0 1 3 15V5.25m18 0A2.25 2.25 0 0 0 18.75 3H5.25A2.25 2.25 0 0 0 3 5.25m18 0V12a2.25 2.25 0 0 1-2.25 2.25H5.25A2.25 2.25 0 0 1 3 12V5.25" />
++			</svg>
++			<span class="flex-1 min-w-0 truncate text-left text-gray-700 dark:text-gray-200">
++				{$selectedNode?.label ?? $i18n.t('All machines')}
++			</span>
++			{#if $selectedNode}
++				<span class="size-1.5 rounded-full shrink-0 {$selectedNode.online ? 'bg-green-500' : 'bg-gray-400'}"></span>
++			{/if}
++			<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"
++				class="size-3.5 shrink-0 text-gray-400 transition-transform {open ? 'rotate-180' : ''}">
++				<path fill-rule="evenodd" d="M5.22 8.22a.75.75 0 0 1 1.06 0L10 11.94l3.72-3.72a.75.75 0 1 1 1.06 1.06l-4.25 4.25a.75.75 0 0 1-1.06 0L5.22 9.28a.75.75 0 0 1 0-1.06Z" clip-rule="evenodd" />
++			</svg>
++		</button>
++
++		{#if open}
++			<!-- svelte-ignore a11y-no-static-element-interactions -->
++			<div class="fixed inset-0 z-40" on:click={() => (open = false)}></div>
++			<div class="absolute left-1 right-1 mt-1 z-50 rounded-lg border border-gray-100 dark:border-gray-850 bg-white dark:bg-gray-900 shadow-lg py-1 max-h-72 overflow-y-auto" role="listbox">
++				<button
++					class="w-full flex items-center gap-2 px-2.5 py-[6px] text-[13px] hover:bg-gray-100 dark:hover:bg-gray-900 transition {($selectedNodeId ?? null) === null ? 'font-medium' : ''}"
++					on:click={() => pick(null)} role="option" aria-selected={($selectedNodeId ?? null) === null}
++				>
++					<span class="size-1.5 rounded-full shrink-0 bg-gray-300 dark:bg-gray-600"></span>
++					<span class="flex-1 min-w-0 truncate text-left">{$i18n.t('All machines')}</span>
++				</button>
++				{#each $nodes as n (n.id)}
++					<button
++						class="w-full flex items-center gap-2 px-2.5 py-[6px] text-[13px] hover:bg-gray-100 dark:hover:bg-gray-900 transition {$selectedNodeId === n.id ? 'font-medium' : ''}"
++						on:click={() => pick(n.id)} role="option" aria-selected={$selectedNodeId === n.id}
++					>
++						<span class="size-1.5 rounded-full shrink-0 {n.online ? 'bg-green-500' : 'bg-gray-400'}"></span>
++						<span class="flex-1 min-w-0 truncate text-left">{n.label}</span>
++						{#if !n.online}<span class="text-[10px] text-gray-400 shrink-0">{$i18n.t('offline')}</span>{/if}
++					</button>
++				{/each}
++			</div>
++		{/if}
++	</div>
++{/if}
+diff --git a/src/lib/utils/agentInbox.ts b/src/lib/utils/agentInbox.ts
+new file mode 100644
+index 0000000..a7743f8
+--- /dev/null
++++ b/src/lib/utils/agentInbox.ts
+@@ -0,0 +1,36 @@
++// LOCAL PATCH (agent-hub fork): shared chat-summary store. Exposes a {chat_id -> summary} map
++// (from /api/inbox — same source as the /inbox page) so the sidebar chat list shows live one-line
++// summaries under titles. Self-managing: it polls ONLY while something subscribes to it (i.e. while
++// chat items are on screen), and stops when nothing does.
++import { writable } from 'svelte/store';
++import { browser } from '$app/environment';
++import { WEBUI_API_BASE_URL } from '$lib/constants';
++
++async function fetchSummaries(): Promise<Record<string, string>> {
++	const r = await fetch(`${WEBUI_API_BASE_URL}/inbox/`, {
++		headers: { Authorization: `Bearer ${localStorage.getItem('token') ?? ''}` }
++	});
++	if (!r.ok) return {};
++	const d = await r.json();
++	const map: Record<string, string> = {};
++	for (const c of d || []) if (c?.id && c?.summary) map[c.id] = c.summary;
++	return map;
++}
++
++export const chatSummaries = writable<Record<string, string>>({}, (set) => {
++	if (!browser) return;
++	let alive = true;
++	const tick = async () => {
++		if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
++		try {
++			const m = await fetchSummaries();
++			if (alive) set(m);
++		} catch (e) {}
++	};
++	tick();
++	const timer = setInterval(tick, 5000);
++	return () => {
++		alive = false;
++		clearInterval(timer);
++	};
++});
+diff --git a/src/lib/utils/agentTerminals.ts b/src/lib/utils/agentTerminals.ts
+new file mode 100644
+index 0000000..df40d44
+--- /dev/null
++++ b/src/lib/utils/agentTerminals.ts
+@@ -0,0 +1,86 @@
++// LOCAL PATCH (agent-hub fork): shared terminal-session store.
++// Terminal sessions live in the left sidebar (like chats) and drive the /terminal page. Kept in a
++// shared store (persisted to localStorage) so the sidebar, the page, and the future inbox stay in
++// sync. Each session = its own persistent shell on host `owui-terminal` via OWUI's /api/v1/terminals
++// proxy. Closing a session also kills the backend shell.
++import { writable, get } from 'svelte/store';
++import { browser } from '$app/environment';
++import { WEBUI_API_BASE_URL } from '$lib/constants';
++
++export type TerminalSession = { id: string; name: string; createdAt: number; pinned?: boolean };
++
++const LS_KEY = 'agent-hub:terminal-sessions';
++const SERVER_ID = 'aibo';
++
++const load = (): { sessions: TerminalSession[]; activeId: string } => {
++	if (!browser) return { sessions: [], activeId: '' };
++	try {
++		const s = JSON.parse(localStorage.getItem(LS_KEY) || '{}');
++		return { sessions: Array.isArray(s.sessions) ? s.sessions : [], activeId: s.activeId || '' };
++	} catch {
++		return { sessions: [], activeId: '' };
++	}
++};
++
++const _init = load();
++export const terminalSessions = writable<TerminalSession[]>(_init.sessions);
++export const activeTerminalId = writable<string>(_init.activeId);
++
++const persist = () => {
++	if (!browser) return;
++	try {
++		localStorage.setItem(
++			LS_KEY,
++			JSON.stringify({ sessions: get(terminalSessions), activeId: get(activeTerminalId) })
++		);
++	} catch {}
++};
++terminalSessions.subscribe(persist);
++activeTerminalId.subscribe(persist);
++
++const uid = () =>
++	'term-' + (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`);
++
++export const newTerminalSession = (): string => {
++	const list = get(terminalSessions);
++	const s: TerminalSession = { id: uid(), name: `Terminal ${list.length + 1}`, createdAt: Date.now() };
++	terminalSessions.set([...list, s]);
++	activeTerminalId.set(s.id);
++	return s.id;
++};
++
++export const closeTerminalSession = async (id: string) => {
++	if (browser) {
++		try {
++			await fetch(`${WEBUI_API_BASE_URL}/terminals/${SERVER_ID}/api/terminals/${id}`, {
++				method: 'DELETE',
++				headers: { Authorization: `Bearer ${localStorage.getItem('token') ?? ''}` }
++			});
++		} catch {}
++	}
++	const list = get(terminalSessions).filter((x) => x.id !== id);
++	terminalSessions.set(list);
++	if (get(activeTerminalId) === id) activeTerminalId.set(list[list.length - 1]?.id ?? '');
++};
++
++export const renameTerminalSession = (id: string, name: string) => {
++	terminalSessions.set(
++		get(terminalSessions).map((x) => (x.id === id ? { ...x, name: name.trim() || x.name, pinned: true } : x))
++	);
++};
++
++// Auto-title from the terminal's OSC title (cwd/command); skips user-renamed (pinned) sessions.
++export const setSessionTitle = (id: string, title: string) => {
++	const t = (title || '').trim();
++	if (!t) return;
++	terminalSessions.set(
++		get(terminalSessions).map((x) => (x.id === id && !x.pinned ? { ...x, name: t } : x))
++	);
++};
++
++// Ensure there's at least one session and a valid active one (call on the /terminal page).
++export const ensureTerminalSession = () => {
++	if (get(terminalSessions).length === 0) newTerminalSession();
++	const list = get(terminalSessions);
++	if (!list.find((x) => x.id === get(activeTerminalId))) activeTerminalId.set(list[0]?.id ?? '');
++};
+diff --git a/src/lib/utils/machineSelector.ts b/src/lib/utils/machineSelector.ts
+new file mode 100644
+index 0000000..b4813a2
+--- /dev/null
++++ b/src/lib/utils/machineSelector.ts
+@@ -0,0 +1,82 @@
++// LOCAL PATCH (agent-hub fork, E4): machine (node) selector state.
++// Reads the fork node registry (/api/nodes) — the source of truth for which machines exist, which
++// models each serves, and each machine's terminal server. Selecting a machine scopes BOTH the chat
++// model list (to that machine's model ids) AND the /terminal target (to that machine's terminal id).
++// null selection = "All machines" (no filtering — current behaviour).
++import { writable, derived, get } from 'svelte/store';
++import { browser } from '$app/environment';
++import { WEBUI_API_BASE_URL } from '$lib/constants';
++import { selectedTerminalId } from '$lib/stores';
++
++export type Node = {
++	id: string;
++	label: string;
++	url?: string;
++	api_url?: string;
++	capabilities: string[];
++	models: string[];
++	terminal?: { id: string; name?: string; url?: string; key?: string } | null;
++	version?: string;
++	online: boolean;
++	last_seen?: number;
++};
++
++const SEL_KEY = 'agent-hub:selected-node';
++
++function loadSel(): string | null {
++	if (!browser) return null;
++	try {
++		return localStorage.getItem(SEL_KEY) || null;
++	} catch (e) {
++		return null;
++	}
++}
++
++// Selected node id (persisted). null = All machines.
++export const selectedNodeId = writable<string | null>(loadSel());
++selectedNodeId.subscribe((v) => {
++	if (!browser) return;
++	try {
++		if (v) localStorage.setItem(SEL_KEY, v);
++		else localStorage.removeItem(SEL_KEY);
++	} catch (e) {}
++});
++
++// Self-polling registry: fetches /api/nodes only while something is subscribed.
++export const nodes = writable<Node[]>([], (set) => {
++	if (!browser) return;
++	let alive = true;
++	const tick = async () => {
++		try {
++			const r = await fetch(`${WEBUI_API_BASE_URL}/nodes/`, {
++				headers: { Authorization: `Bearer ${localStorage.getItem('token') ?? ''}` }
++			});
++			if (!r.ok) return;
++			const d = await r.json();
++			if (alive && Array.isArray(d)) set(d);
++		} catch (e) {}
++	};
++	tick();
++	const timer = setInterval(tick, 5000);
++	return () => {
++		alive = false;
++		clearInterval(timer);
++	};
++});
++
++export const selectedNode = derived([nodes, selectedNodeId], ([$nodes, $id]) =>
++	$id ? ($nodes.find((n) => n.id === $id) ?? null) : null
++);
++
++// Set of model ids for the selected machine, or null when "All machines" (no filter).
++export const selectedNodeModelIds = derived(selectedNode, ($n) =>
++	$n && Array.isArray($n.models) && $n.models.length ? new Set($n.models) : null
++);
++
++// Pick a machine: scope models + point the terminal at that machine's terminal server.
++export function selectMachine(id: string | null) {
++	selectedNodeId.set(id);
++	if (!id) return;
++	const n = get(nodes).find((x) => x.id === id);
++	if (n?.terminal?.id) selectedTerminalId.set(n.terminal.id);
++}
+diff --git a/src/routes/(app)/inbox/+page.svelte b/src/routes/(app)/inbox/+page.svelte
+new file mode 100644
+index 0000000..e7e5906
+--- /dev/null
++++ b/src/routes/(app)/inbox/+page.svelte
+@@ -0,0 +1,126 @@
++<script lang="ts">
++	// LOCAL PATCH (agent-hub fork): E2 Inbox with real-time smart summaries. Polls /api/inbox (chats +
++	// unread/running state + LLM one-line summaries from local llama3.2:3b, regenerated when a chat
++	// changes) and lists terminal sessions from the shared store. Summaries update live as chats change.
++	import { onMount, onDestroy, getContext } from 'svelte';
++	import { goto } from '$app/navigation';
++	import { WEBUI_API_BASE_URL } from '$lib/constants';
++	import { showSidebar, mobile } from '$lib/stores';
++	import { terminalSessions, activeTerminalId } from '$lib/utils/agentTerminals';
++	import Spinner from '$lib/components/common/Spinner.svelte';
++	import MenuLines from '$lib/components/icons/MenuLines.svelte';
++
++	const i18n = getContext('i18n');
++	let loaded = false;
++	let chats: any[] = [];
++	let timer: ReturnType<typeof setInterval> | null = null;
++
++	const load = async () => {
++		try {
++			const r = await fetch(`${WEBUI_API_BASE_URL}/inbox/`, {
++				headers: { Authorization: `Bearer ${localStorage.getItem('token') ?? ''}` }
++			});
++			if (r.ok) chats = (await r.json()) || [];
++		} catch (e) {}
++		loaded = true;
++	};
++
++	onMount(() => {
++		load();
++		// live updates: re-poll while the tab is visible so summaries/state refresh in real time
++		timer = setInterval(() => {
++			if (typeof document === 'undefined' || document.visibilityState === 'visible') load();
++		}, 3000);
++	});
++	onDestroy(() => {
++		if (timer) clearInterval(timer);
++	});
++
++	const st = (c: any) =>
++		c.active ? 'running' : (c.updated_at ?? 0) > (c.last_read_at ?? 0) ? 'unread' : 'read';
++	$: needs = chats.filter((c) => st(c) !== 'read');
++	$: recent = chats.filter((c) => st(c) === 'read');
++
++	const rel = (t: number) => {
++		if (!t) return '';
++		const s = Math.floor(Date.now() / 1000) - t;
++		if (s < 60) return 'now';
++		if (s < 3600) return `${Math.floor(s / 60)}m`;
++		if (s < 86400) return `${Math.floor(s / 3600)}h`;
++		return `${Math.floor(s / 86400)}d`;
++	};
++	const dot = (state: string) =>
++		state === 'running'
++			? 'bg-green-500 animate-pulse'
++			: state === 'unread'
++				? 'bg-blue-500'
++				: 'bg-gray-300 dark:bg-gray-700';
++	const sub = (c: any) => c.summary || c.snippet || '';
++</script>
++
++<svelte:head><title>{$i18n.t('Inbox')}</title></svelte:head>
++
++<div class="h-full w-full flex flex-col overflow-hidden">
++	<div class="flex items-center gap-2 px-3 py-2.5 border-b border-gray-50 dark:border-gray-850 shrink-0">
++		{#if $mobile && !$showSidebar}
++			<button class="p-1.5 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-900" aria-label="Menu"
++				on:click={() => showSidebar.set(true)}><MenuLines className="size-5" /></button>
++		{/if}
++		<div class="text-base font-medium">{$i18n.t('Inbox')}</div>
++		{#if needs.length}<div class="text-xs px-1.5 py-0.5 rounded-full bg-blue-500/10 text-blue-500">{needs.length}</div>{/if}
++	</div>
++
++	{#if !loaded}
++		<div class="flex-1 flex items-center justify-center"><Spinner /></div>
++	{:else}
++		<div class="flex-1 overflow-y-auto px-2 py-2 max-w-3xl w-full mx-auto">
++			{#if needs.length}
++				<div class="px-2 pt-1 pb-1 text-xs font-medium text-gray-400 uppercase tracking-wide">{$i18n.t('Needs attention')}</div>
++				{#each needs as c (c.id)}
++					<button class="w-full text-left flex items-start gap-2.5 rounded-xl px-2.5 py-2 hover:bg-gray-50 dark:hover:bg-gray-900 transition"
++						on:click={() => goto(`/c/${c.id}`)}>
++						<span class="mt-1.5 size-2 shrink-0 rounded-full {dot(st(c))}"></span>
++						<span class="flex-1 min-w-0">
++							<span class="flex items-center gap-2">
++								<span class="truncate text-sm font-medium">{c.title || $i18n.t('New Chat')}</span>
++								<span class="ml-auto shrink-0 text-[11px] text-gray-400">{rel(c.updated_at)}</span>
++							</span>
++							{#if sub(c)}<span class="block truncate text-xs text-gray-500 dark:text-gray-400 mt-0.5">{sub(c)}</span>{/if}
++						</span>
++					</button>
++				{/each}
++			{/if}
++
++			{#if $terminalSessions.length}
++				<div class="px-2 pt-3 pb-1 text-xs font-medium text-gray-400 uppercase tracking-wide">{$i18n.t('Terminals')}</div>
++				{#each $terminalSessions as t (t.id)}
++					<button class="w-full text-left flex items-center gap-2.5 rounded-xl px-2.5 py-2 hover:bg-gray-50 dark:hover:bg-gray-900 transition"
++						on:click={() => { activeTerminalId.set(t.id); goto('/terminal'); }}>
++						<span class="size-2 shrink-0 rounded-full bg-green-500"></span>
++						<span class="truncate text-sm">{t.name}</span>
++						<span class="ml-auto shrink-0 text-[11px] text-gray-400">shell</span>
++					</button>
++				{/each}
++			{/if}
++
++			<div class="px-2 pt-3 pb-1 text-xs font-medium text-gray-400 uppercase tracking-wide">{$i18n.t('Recent')}</div>
++			{#each recent as c (c.id)}
++				<button class="w-full text-left flex items-start gap-2.5 rounded-xl px-2.5 py-2 hover:bg-gray-50 dark:hover:bg-gray-900 transition"
++					on:click={() => goto(`/c/${c.id}`)}>
++					<span class="mt-1.5 size-2 shrink-0 rounded-full {dot('read')}"></span>
++					<span class="flex-1 min-w-0">
++						<span class="flex items-center gap-2">
++							<span class="truncate text-sm">{c.title || $i18n.t('New Chat')}</span>
++							<span class="ml-auto shrink-0 text-[11px] text-gray-400">{rel(c.updated_at)}</span>
++						</span>
++						{#if sub(c)}<span class="block truncate text-xs text-gray-500 dark:text-gray-400 mt-0.5">{sub(c)}</span>{/if}
++					</span>
++				</button>
++			{/each}
++
++			{#if chats.length === 0}
++				<div class="text-center text-sm text-gray-400 py-10">{$i18n.t('Nothing here yet.')}</div>
++			{/if}
++		</div>
++	{/if}
++</div>
+diff --git a/src/routes/(app)/terminal/+page.svelte b/src/routes/(app)/terminal/+page.svelte
+new file mode 100644
+index 0000000..b16c932
+--- /dev/null
++++ b/src/routes/(app)/terminal/+page.svelte
+@@ -0,0 +1,148 @@
++<script lang="ts">
++	// LOCAL PATCH (agent-hub fork): dedicated Terminal page. Sessions are managed in the LEFT SIDEBAR
++	// (shared store $lib/utils/agentTerminals — inbox-ready); this page renders the active shell
++	// full-width with a slim action bar (rename active + font size + reconnect + Files panel toggle).
++	// Auto-titles sessions from the terminal's OSC title (cwd/command). No chat/model.
++	// The Files panel reuses OWUI's native FileNav against the aibo terminal server's file-API
++	// (/files/*), scoped to the active session's cwd via chatId.
++	import { onMount, getContext } from 'svelte';
++	import { get } from 'svelte/store';
++	import { terminalServers, selectedTerminalId, showSidebar, mobile } from '$lib/stores';
++	import {
++		terminalSessions,
++		activeTerminalId,
++		newTerminalSession,
++		renameTerminalSession,
++		setSessionTitle,
++		ensureTerminalSession
++	} from '$lib/utils/agentTerminals';
++	import { getTerminalServers } from '$lib/apis/terminal';
++	import XTerminal from '$lib/components/chat/XTerminal.svelte';
++	import FileNav from '$lib/components/chat/FileNav.svelte';
++	import Spinner from '$lib/components/common/Spinner.svelte';
++	import MenuLines from '$lib/components/icons/MenuLines.svelte';
++	import Folder from '$lib/components/icons/Folder.svelte';
++	import XMark from '$lib/components/icons/XMark.svelte';
++
++	const i18n = getContext('i18n');
++	const SERVER_ID = 'aibo';
++	const FS_KEY = 'agent-hub:terminal-fontsize';
++	const FILES_KEY = 'agent-hub:terminal-files-open';
++
++	let loaded = false;
++	let hasServer = false;
++	let reconnectKey = 0;
++	let renaming = false;
++	let renameValue = '';
++	let fontSize = 13;
++	let showFiles = false;
++
++	$: active = $terminalSessions.find((s) => s.id === $activeTerminalId) ?? null;
++
++	const setFont = (n: number) => {
++		fontSize = Math.min(22, Math.max(9, n));
++		try { localStorage.setItem(FS_KEY, String(fontSize)); } catch (e) {}
++	};
++	const toggleFiles = () => {
++		showFiles = !showFiles;
++		try { localStorage.setItem(FILES_KEY, showFiles ? '1' : '0'); } catch (e) {}
++	};
++	const startRename = () => { if (active) { renameValue = active.name; renaming = true; } };
++	const commitRename = () => { if (active) renameTerminalSession(active.id, renameValue); renaming = false; };
++	const onTitle = (t: string) => {
++		if (!$activeTerminalId) return;
++		const short = (t || '').includes(': ') ? t.split(': ').slice(1).join(': ') : t;
++		setSessionTitle($activeTerminalId, short);
++	};
++
++	onMount(async () => {
++		try { fontSize = Number(localStorage.getItem(FS_KEY)) || 13; } catch (e) {}
++		try { showFiles = localStorage.getItem(FILES_KEY) === '1'; } catch (e) {}
++		const servers = await getTerminalServers(localStorage.token).catch(() => []);
++		terminalServers.set(servers ?? []);
++		// LOCAL PATCH (E4): honour the machine selector's choice if it points at a real server,
++		// else fall back to the default aibo/first server.
++		const cur = get(selectedTerminalId);
++		const t =
++			(servers ?? []).find((s: any) => s.id === cur) ??
++			(servers ?? []).find((s: any) => s.id === SERVER_ID) ??
++			(servers ?? [])[0];
++		if (t?.id) { selectedTerminalId.set(t.id); hasServer = true; }
++		ensureTerminalSession();
++		loaded = true;
++	});
++</script>
++
++<svelte:head><title>{$i18n.t('Terminal')}</title></svelte:head>
++
++<div class="h-full w-full flex flex-col overflow-hidden">
++	<div class="flex items-center gap-1.5 px-2 py-1.5 border-b border-gray-50 dark:border-gray-850 shrink-0">
++		{#if $mobile && !$showSidebar}
++			<button class="p-1.5 shrink-0 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-900"
++				aria-label="Menu" on:click={() => showSidebar.set(true)}>
++				<MenuLines className="size-5" />
++			</button>
++		{/if}
++		{#if renaming}
++			<!-- svelte-ignore a11y-autofocus -->
++			<input class="text-sm font-medium bg-transparent outline-hidden min-w-0 flex-1" bind:value={renameValue}
++				autofocus on:blur={commitRename} on:keydown={(e) => e.key === 'Enter' && commitRename()} />
++		{:else}
++			<div class="text-sm font-medium truncate flex-1 min-w-0 cursor-text" title={$i18n.t('Rename')}
++				on:dblclick={startRename}>{active?.name ?? $i18n.t('Terminal')}</div>
++		{/if}
++
++		<div class="shrink-0 flex items-center text-gray-500">
++			<button class="px-1.5 py-1 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-900 transition text-xs"
++				title={$i18n.t('Smaller')} on:click={() => setFont(fontSize - 1)}>A−</button>
++			<button class="px-1.5 py-1 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-900 transition text-sm"
++				title={$i18n.t('Larger')} on:click={() => setFont(fontSize + 1)}>A+</button>
++			<button class="px-2 py-1 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-900 transition text-xs"
++				title={$i18n.t('Reconnect')} on:click={() => (reconnectKey += 1)}>⟳</button>
++			<button
++				class="p-1 ml-0.5 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-900 transition {showFiles ? 'text-gray-900 dark:text-white bg-gray-100 dark:bg-gray-850' : ''}"
++				title={$i18n.t('Files')} aria-pressed={showFiles} on:click={toggleFiles}>
++				<Folder className="size-4" />
++			</button>
++		</div>
++	</div>
++
++	<div class="flex-1 min-h-0 flex relative">
++		<div class="flex-1 min-w-0 min-h-0 bg-black">
++			{#if !loaded}
++				<div class="h-full flex items-center justify-center"><Spinner /></div>
++			{:else if !hasServer}
++				<div class="h-full flex items-center justify-center text-gray-400 text-sm text-center px-6">
++					{$i18n.t('No terminal server configured. Add one in Admin Settings → Integrations.')}
++				</div>
++			{:else if $activeTerminalId}
++				{#key $activeTerminalId + '-' + reconnectKey}
++					<div class="h-full w-full p-1.5"><XTerminal chatId={$activeTerminalId} {fontSize} on:title={(e) => onTitle(e.detail)} /></div>
++				{/key}
++			{:else}
++				<div class="h-full flex items-center justify-center">
++					<button class="px-3 py-1.5 text-sm rounded-lg border border-gray-200 dark:border-gray-800 hover:bg-gray-900/40 text-gray-300"
++						on:click={newTerminalSession}>+ {$i18n.t('New Terminal')}</button>
++				</div>
++			{/if}
++		</div>
++
++		{#if showFiles && hasServer}
++			<!-- Files panel: side-drawer on desktop, full overlay on mobile. Reuses native FileNav. -->
++			<div
++				class="{$mobile ? 'absolute inset-0 z-20' : 'relative w-80 lg:w-96 shrink-0 border-l border-gray-50 dark:border-gray-850'} flex flex-col min-h-0 bg-white dark:bg-gray-900"
++			>
++				<div class="flex items-center justify-between px-2 py-1.5 border-b border-gray-50 dark:border-gray-850 shrink-0">
++					<div class="text-sm font-medium text-gray-700 dark:text-gray-200">{$i18n.t('Files')}</div>
++					<button class="p-1 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-900 text-gray-500"
++						aria-label={$i18n.t('Close')} on:click={toggleFiles}>
++						<XMark className="size-4" />
++					</button>
++				</div>
++				<div class="flex-1 min-h-0 overflow-hidden">
++					<FileNav chatId={$activeTerminalId} />
++				</div>
++			</div>
++		{/if}
++	</div>
++</div>

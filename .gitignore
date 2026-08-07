@@ -1,5 +1,15 @@
+# secrets + local state
 .env
+*.bak
+.env.*.bak
 *.log
-owui-claude/node_modules/
-owui-hermes/__pycache__/
 ff-state/
+
+# python / node build artifacts
+**/__pycache__/
+**/node_modules/
+**/venv/
+**/*.pyc
+
+# OWUI fork: track patches + build.sh; NEVER the 150M+ upstream checkout (reproduced by build.sh)
+owui-fork/upstream/

@@ -1,0 +1,389 @@
+"""owui-terminal — net-new PTY backend implementing Open WebUI's NATIVE "open-terminal" server spec,
+so OWUI's built-in terminal UI (XTerminal.svelte) works with ZERO fork / no UI changes.
+
+Contract (from OWUI routers/terminals.py + XTerminal.svelte):
+  POST /api/terminals            (Authorization: Bearer <key>, X-Session-Id: <chatId>) -> {"id": "<sid>"}
+  WS   /api/terminals/{sid}      first client msg {"type":"auth","token":"<key>"}; then:
+       client->server: raw BINARY = keystrokes; {"type":"resize","cols","rows"}; {"type":"ping"}
+       server->client: raw BINARY = PTY output
+Session keyed by X-Session-Id (chatId) => each chat keeps its own shell, survives reconnect (replay buffer).
+Built fresh (PTY techniques from claude-monitor, not coupled). Env: PORT(7681) TERMINAL_TOKEN
+TERMINAL_SHELL(/bin/bash) TERMINAL_CWD REPLAY_BYTES(262144) IDLE_TTL(3600)
+"""
+import asyncio, json, os, pty, fcntl, termios, struct, signal, secrets, time
+import shutil, io, zipfile, mimetypes
+from aiohttp import web, WSMsgType
+
+HOME = os.path.expanduser("~")
+
+PORT = int(os.environ.get("PORT", "7681"))
+TOKEN = os.environ.get("TERMINAL_TOKEN", "")
+SHELL = os.environ.get("TERMINAL_SHELL", "/bin/bash")
+CWD = os.environ.get("TERMINAL_CWD", os.path.expanduser("~"))
+REPLAY = int(os.environ.get("REPLAY_BYTES", str(256 * 1024)))
+IDLE_TTL = int(os.environ.get("IDLE_TTL", "3600"))
+
+sessions = {}   # sid -> Session
+
+
+class Session:
+    def __init__(self, sid, loop):
+        self.sid, self.loop = sid, loop
+        self.clients = set()
+        self.buffer = bytearray()
+        self.last_active = time.monotonic()
+        self.alive = True
+        pid, fd = pty.fork()
+        if pid == 0:  # child
+            try:
+                os.chdir(CWD)
+            except Exception:
+                pass
+            env = dict(os.environ, TERM="xterm-256color")
+            env.pop("TERMINAL_TOKEN", None)
+            os.execvpe(SHELL, [SHELL, "-l"], env)
+            os._exit(1)
+        self.pid, self.fd = pid, fd
+        fcntl.fcntl(fd, fcntl.F_SETFL, fcntl.fcntl(fd, fcntl.F_GETFL) | os.O_NONBLOCK)
+        loop.add_reader(fd, self._on_pty)
+
+    def _on_pty(self):
+        try:
+            data = os.read(self.fd, 65536)
+        except (OSError, BlockingIOError):
+            return
+        if not data:
+            self.close(exited=True)
+            return
+        self.buffer += data
+        if len(self.buffer) > REPLAY:
+            del self.buffer[:-REPLAY]
+        self.last_active = time.monotonic()
+        for ws in list(self.clients):
+            self.loop.create_task(self._send(ws, data))
+
+    async def _send(self, ws, data):
+        try:
+            await ws.send_bytes(data)
+        except Exception:
+            self.clients.discard(ws)
+
+    def write(self, data: bytes):
+        try:
+            os.write(self.fd, data)
+            self.last_active = time.monotonic()
+        except OSError:
+            pass
+
+    def resize(self, cols, rows):
+        try:
+            fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", int(rows), int(cols), 0, 0))
+        except (OSError, TypeError, ValueError):
+            pass
+
+    def close(self, exited=False):
+        if not self.alive:
+            return
+        self.alive = False
+        try:
+            self.loop.remove_reader(self.fd)
+        except Exception:
+            pass
+        try:
+            os.close(self.fd)
+        except Exception:
+            pass
+        if not exited:
+            try:
+                os.kill(self.pid, signal.SIGKILL)
+            except Exception:
+                pass
+        try:
+            os.waitpid(self.pid, os.WNOHANG)
+        except Exception:
+            pass
+        sessions.pop(self.sid, None)
+
+
+def _bearer_ok(request):
+    if not TOKEN:
+        return True
+    auth = request.headers.get("Authorization", "")
+    return auth.removeprefix("Bearer ").strip() == TOKEN
+
+
+async def create_session(request):
+    if not _bearer_ok(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    sid = request.headers.get("X-Session-Id") or secrets.token_hex(8)
+    if sid not in sessions or not sessions[sid].alive:
+        sessions[sid] = Session(sid, asyncio.get_running_loop())
+    return web.json_response({"id": sid})
+
+
+async def ws_terminal(request):
+    sid = request.match_info["id"]
+    ws = web.WebSocketResponse(max_msg_size=0, heartbeat=30)
+    await ws.prepare(request)
+    loop = asyncio.get_running_loop()
+    authed = (not TOKEN)
+    sess = None
+
+    async def attach():
+        nonlocal sess
+        s = sessions.get(sid)
+        if s is None or not s.alive:
+            s = Session(sid, loop)
+            sessions[sid] = s
+        sess = s
+        sess.clients.add(ws)
+        if sess.buffer:
+            try:
+                await ws.send_bytes(bytes(sess.buffer))
+            except Exception:
+                pass
+
+    if authed:
+        await attach()
+    try:
+        async for msg in ws:
+            if msg.type == WSMsgType.BINARY:
+                if authed and sess:
+                    sess.write(msg.data)
+            elif msg.type == WSMsgType.TEXT:
+                try:
+                    d = json.loads(msg.data)
+                except Exception:
+                    continue
+                t = d.get("type")
+                if t == "auth":
+                    if TOKEN and d.get("token") != TOKEN:
+                        await ws.close(code=4401)
+                        return ws
+                    if not authed:
+                        authed = True
+                        await attach()
+                elif not authed:
+                    continue
+                elif t == "resize":
+                    sess.resize(d.get("cols", 80), d.get("rows", 24))
+                elif t == "input":
+                    sess.write((d.get("data") or "").encode())
+                elif t == "ping":
+                    # keepalive only — do NOT reply with a text frame; XTerminal writes any text
+                    # frame straight into the terminal (it would print `{"type":"pong"}` repeatedly).
+                    pass
+            elif msg.type in (WSMsgType.CLOSE, WSMsgType.ERROR):
+                break
+    finally:
+        if sess:
+            sess.clients.discard(ws)  # shell keeps running for reconnect
+    return ws
+
+
+async def list_sessions(request):
+    if not _bearer_ok(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    return web.json_response({"sessions": [
+        {"id": sid, "clients": len(s.clients)} for sid, s in sessions.items() if s.alive
+    ]})
+
+
+async def delete_session(request):
+    if not _bearer_ok(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    s = sessions.get(request.match_info["id"])
+    if s:
+        s.close()
+    return web.json_response({"ok": True})
+
+
+async def _reaper(app):
+    while True:
+        await asyncio.sleep(60)
+        now = time.monotonic()
+        for sid, s in list(sessions.items()):
+            if not s.clients and (now - s.last_active) > IDLE_TTL:
+                s.close()
+
+
+async def _on_start(app):
+    app["reaper"] = asyncio.create_task(_reaper(app))
+
+
+
+# ── LOCAL PATCH: filesystem API for OWUI's native terminal workspace (FileNav) ──
+def _cwd_for(sid):
+    sess = sessions.get(sid)
+    if sess and sess.alive:
+        try:
+            return os.readlink(f"/proc/{sess.pid}/cwd")
+        except Exception:
+            pass
+    return HOME
+
+
+async def fs_config(request):
+    if not _bearer_ok(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    return web.json_response({"features": {"terminal": True}})
+
+
+async def fs_cwd(request):
+    if not _bearer_ok(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    cwd = _cwd_for(request.headers.get("X-Session-Id", ""))
+    return web.json_response({"cwd": cwd, "home": HOME, "root": {"path": HOME, "label": "home"}})
+
+
+async def fs_list(request):
+    if not _bearer_ok(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    d = os.path.expanduser(request.query.get("directory", "/") or "/")
+    entries = []
+    try:
+        with os.scandir(d) as it:
+            for e in it:
+                try:
+                    st = e.stat(follow_symlinks=False)
+                    entries.append({"name": e.name, "type": "directory" if e.is_dir() else "file",
+                                    "size": st.st_size, "modified": int(st.st_mtime)})
+                except Exception:
+                    entries.append({"name": e.name, "type": "file"})
+    except Exception as ex:
+        return web.json_response({"error": str(ex)}, status=400)
+    entries.sort(key=lambda x: (x["type"] != "directory", x["name"].lower()))
+    return web.json_response({"entries": entries})
+
+
+async def fs_read(request):
+    if not _bearer_ok(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    p = os.path.expanduser(request.query.get("path", ""))
+    try:
+        if os.path.getsize(p) > 2_000_000:
+            return web.json_response({"error": "file too large to preview"}, status=413)
+        with open(p, "r", encoding="utf-8", errors="replace") as f:
+            return web.json_response({"content": f.read()})
+    except Exception as ex:
+        return web.json_response({"error": str(ex)}, status=400)
+
+
+async def fs_view(request):
+    if not _bearer_ok(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    p = os.path.expanduser(request.query.get("path", ""))
+    if not os.path.isfile(p):
+        return web.json_response({"error": "not found"}, status=404)
+    ctype = mimetypes.guess_type(p)[0] or "application/octet-stream"
+    return web.FileResponse(p, headers={
+        "Content-Disposition": f'attachment; filename="{os.path.basename(p)}"', "Content-Type": ctype})
+
+
+async def fs_mkdir(request):
+    if not _bearer_ok(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    try:
+        b = await request.json()
+        os.makedirs(os.path.expanduser(b.get("path", "")), exist_ok=True)
+        return web.json_response({"ok": True})
+    except Exception as ex:
+        return web.json_response({"error": str(ex)}, status=400)
+
+
+async def fs_delete(request):
+    if not _bearer_ok(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    try:
+        b = await request.json()
+        p = os.path.expanduser(b.get("path", ""))
+        if os.path.isdir(p) and not os.path.islink(p):
+            shutil.rmtree(p)
+        else:
+            os.remove(p)
+        return web.json_response({"ok": True})
+    except Exception as ex:
+        return web.json_response({"error": str(ex)}, status=400)
+
+
+async def fs_move(request):
+    if not _bearer_ok(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    try:
+        b = await request.json()
+        src = os.path.expanduser(b.get("source") or b.get("from") or "")
+        dst = os.path.expanduser(b.get("destination") or b.get("to") or "")
+        shutil.move(src, dst)
+        return web.json_response({"ok": True})
+    except Exception as ex:
+        return web.json_response({"error": str(ex)}, status=400)
+
+
+async def fs_upload(request):
+    if not _bearer_ok(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    directory = os.path.expanduser(request.query.get("directory", HOME))
+    try:
+        reader = await request.multipart()
+        field = await reader.next()
+        dest = os.path.join(directory, os.path.basename(field.filename or "upload.bin"))
+        size = 0
+        with open(dest, "wb") as f:
+            while True:
+                chunk = await field.read_chunk()
+                if not chunk:
+                    break
+                f.write(chunk); size += len(chunk)
+        return web.json_response({"path": dest, "size": size})
+    except Exception as ex:
+        return web.json_response({"error": str(ex)}, status=400)
+
+
+async def fs_archive(request):
+    if not _bearer_ok(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    try:
+        b = await request.json()
+        paths = [os.path.expanduser(p) for p in (b.get("paths") or [])]
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+            for p in paths:
+                if os.path.isdir(p):
+                    for root, _, files in os.walk(p):
+                        for fn in files:
+                            fp = os.path.join(root, fn)
+                            z.write(fp, os.path.relpath(fp, os.path.dirname(p)))
+                elif os.path.isfile(p):
+                    z.write(p, os.path.basename(p))
+        buf.seek(0)
+        return web.Response(body=buf.read(), headers={
+            "Content-Type": "application/zip", "Content-Disposition": 'attachment; filename="download.zip"'})
+    except Exception as ex:
+        return web.json_response({"error": str(ex)}, status=400)
+
+
+def make_app():
+    app = web.Application()
+    app.router.add_post("/api/terminals", create_session)
+    app.router.add_get("/api/terminals/sessions", list_sessions)   # literal before {id}
+    app.router.add_delete("/api/terminals/{id}", delete_session)
+    app.router.add_get("/api/terminals/{id}", ws_terminal)
+    app.router.add_get("/api/config", fs_config)
+    app.router.add_get("/files/cwd", fs_cwd)
+    app.router.add_get("/files/list", fs_list)
+    app.router.add_get("/files/read", fs_read)
+    app.router.add_get("/files/view", fs_view)
+    app.router.add_post("/files/mkdir", fs_mkdir)
+    app.router.add_post("/files/delete", fs_delete)
+    app.router.add_post("/files/move", fs_move)
+    app.router.add_post("/files/upload", fs_upload)
+    app.router.add_post("/files/archive", fs_archive)
+    app.router.add_get("/healthz", lambda r: web.json_response({"ok": True}))
+    app.on_startup.append(_on_start)
+    return app
+
+
+if __name__ == "__main__":
+    print(f"[owui-terminal] open-terminal spec on 0.0.0.0:{PORT} shell={SHELL} cwd={CWD} "
+          f"auth={'on' if TOKEN else 'OFF(dev)'}", flush=True)
+    web.run_app(make_app(), host="0.0.0.0", port=PORT, print=None)

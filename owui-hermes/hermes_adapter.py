@@ -362,21 +362,48 @@ def stream_turn(chat_id, messages):
                     t = p.get("type")
                     pay = p.get("payload") or {}
 
+                    if t in ("tool.start", "tool.complete", "tool.progress") and os.getenv("HERMES_TOOL_DEBUG"):
+                        import sys as _sys
+                        print(f"[tooldbg] {t} keys={list(pay.keys())} pay={json.dumps(pay)[:900]}", file=_sys.stderr, flush=True)
+
                     if t == "message.delta":
                         if pay.get("text"):
                             got_delta = True
                             yield {"content": pay["text"]}
                     elif t == "tool.start":
-                        last_tool = {"name": pay.get("name", "tool"),
-                                     "args": pay.get("context") or pay.get("input") or {}}
+                        # tool.start only carries a human `context` preview (often EMPTY, e.g.
+                        # computer_use). The REAL structured args arrive on tool.complete.
+                        last_tool = {"name": pay.get("name", "tool"), "args": pay.get("context") or {}}
                     elif t == "tool.complete":
-                        res = pay.get("result") or {}
-                        out = res.get("output")
-                        out = "" if out is None else str(out)
-                        out = out.rstrip()
-                        ec = res.get("exit_code")
+                        # Runtime payload (verified live): {tool_id, name, args, duration_s, result}.
+                        # INPUT = the structured `args` (tool.start `context` is a preview / empty).
+                        # OUTPUT `result` shape VARIES by tool, so never assume one field:
+                        #   terminal      -> {output, exit_code, error}
+                        #   computer_use  -> {summary, vision_analysis, app, width, height, elements, ...}
+                        # Try output -> summary/vision_analysis/result_text/text -> slim JSON; never blank.
+                        args = pay.get("args") or last_tool.get("args") or {}
+                        res = pay.get("result")
+                        out, err = "", False
+                        if isinstance(res, dict):
+                            out = res.get("output")
+                            if out is None:
+                                out = "\n".join(str(x) for x in (
+                                    res.get("summary"), res.get("vision_analysis"),
+                                    res.get("result_text"), res.get("text")) if x)
+                            if not out:
+                                slim = {k: v for k, v in res.items()
+                                        if k != "elements" and not (isinstance(v, str) and len(v) > 2000)}
+                                out = json.dumps(slim, ensure_ascii=False)
+                            e, ec = res.get("error"), res.get("exit_code")
+                            err = bool(e) or (ec not in (None, 0))
+                            if e:
+                                out = (str(out) + "\n" if out else "") + str(e)
+                        elif res is not None:
+                            out = str(res)
+                        out = ("" if out is None else str(out)).rstrip()
+                        name = pay.get("name") or last_tool.get("name", "tool")
                         # native OWUI tool card (collapsible "View Result from <name>")
-                        yield {"content": tool_card(last_tool.get("name", "tool"), last_tool.get("args"), out, ec not in (None, 0))}
+                        yield {"content": tool_card(name, args, out, err)}
                         last_tool = {}
                     elif t == "error":
                         msg = pay.get("message") if isinstance(pay, dict) else None

@@ -140,7 +140,15 @@ async function* streamTurn(chatId, model, messages) {
         const c = m.message?.content;
         if (Array.isArray(c)) for (const b of c) if (b.type === "tool_result") {
           try {   // one bad tool result must not kill the turn
-            let txt = typeof b.content === "string" ? b.content : Array.isArray(b.content) ? b.content.filter(x => x.type === "text").map(x => x.text).join("\n") : "";
+            // Handle every tool_result shape so the card's result is never blank: plain string,
+            // an array of blocks (text -> text, image -> [image], other -> its text or JSON), or
+            // a bare object. Old code only kept type==="text" blocks -> image/structured = empty.
+            let txt = typeof b.content === "string" ? b.content
+              : Array.isArray(b.content)
+                ? b.content.map(x => x?.type === "text" ? (x.text || "")
+                    : x?.type === "image" ? "[image]"
+                    : (x?.text ?? JSON.stringify(x))).join("\n")
+                : (b.content == null ? "" : (typeof b.content === "object" ? JSON.stringify(b.content) : String(b.content)));
             txt = (txt || "").trim();
             const pt = pendingTools[b.tool_use_id] || {};
             const name = pt.name || toolQueue.shift() || "tool";

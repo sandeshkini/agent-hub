@@ -1,0 +1,6 @@
+# Rollback override — run UPSTREAM Open WebUI :main instead of the fork.
+#   Fork (default):  docker compose up -d
+#   Stock/rollback:  docker compose -f docker-compose.yml -f docker-compose.stock.yml up -d open-webui
+services:
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main

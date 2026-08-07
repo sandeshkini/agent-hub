@@ -1,0 +1,8 @@
+# The upstream OWUI checkout is reproducible from the pinned tag + patches/ via build.sh
+# (it is also its own git clone). Never vendor it here — it is 150M+ and regenerated on build.
+upstream/
+
+# build/scratch
+*.log
+node_modules/
+.DS_Store

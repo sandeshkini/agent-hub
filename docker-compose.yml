@@ -1,15 +1,24 @@
 name: agent-hub
 
-# Consolidated agent-hub stack: Open WebUI + both adapters + Ollama.
-# Reboot-safe via restart:unless-stopped (+ docker.service enabled).
-# Secrets come from .env (gitignored). OWUI reaches adapters by SERVICE NAME
-# on the compose network; owui-hermes reaches host Hermes via host-gateway.
+# ─────────────────────────────────────────────────────────────────────────────
+# Agent Hub — ONE compose for the whole stack, with two roles via profiles:
+#   COMPOSE_PROFILES=hub   → full hub: Open WebUI (fork) + adapters + ollama + mcp-tools + registrar
+#   COMPOSE_PROFILES=node  → a worker box: adapters + registrar only (registers into a remote hub)
+# Set COMPOSE_PROFILES in .env, then just: `docker compose up -d`
+#
+# owui-terminal is NOT here — it needs a REAL host shell (heroku/git/claude), so it runs on the host
+# (see owui-terminal/install.sh). The hub reaches it at host.docker.internal:7681.
+# Secrets + machine-specific paths come from .env (see .env.example). Reboot-safe (restart:unless-stopped).
+# ─────────────────────────────────────────────────────────────────────────────
 
 services:
   open-webui:
-    image: ghcr.io/open-webui/open-webui:main
+    image: ${OWUI_IMAGE:-agent-hub/open-webui:v0.11.0-fork}   # fork by default; docker-compose.stock.yml rolls back to :main
     container_name: open-webui
+    profiles: ["hub"]
     restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"      # reach the host owui-terminal PTY service (:7681)
     ports:
       - "3000:8080"
     volumes:
@@ -17,14 +26,13 @@ services:
     environment:
       WEBUI_NAME: "Aibo Agents"
       WEBUI_AUTH: "false"
-      # adapters are reachable by service name on the compose network
+      WEBUI_SECRET_KEY: "${WEBUI_SECRET_KEY}"     # PINNED → stable JWT sessions across restarts
+      NODE_HUB_TOKEN: "${NODE_HUB_TOKEN:-}"       # gates /api/nodes/register (empty = open, LAN only)
       OPENAI_API_BASE_URLS: "http://owui-hermes:9211/v1;http://owui-claude:9212/v1;http://owui-opencode:9213/v1"
       OPENAI_API_KEYS: "${ADAPTER_KEY};${ADAPTER_KEY};${ADAPTER_KEY}"
       ENABLE_FORWARD_USER_INFO_HEADERS: "true"   # forwards X-OpenWebUI-Chat-Id -> session continuity
-      ENABLE_OLLAMA_API: "true"                  # Phase 3: local model fallback
-      OLLAMA_BASE_URL: "http://ollama:11434"     # reach the ollama container by service name
-      # agents/personas primitives (personas = Workspace Models; grouped by Folders;
-      # orchestrated via Channels + Automations + background Subagents)
+      ENABLE_OLLAMA_API: "true"
+      OLLAMA_BASE_URL: "http://ollama:11434"
       ENABLE_CHANNELS: "true"
       ENABLE_FOLDERS: "true"
       ENABLE_SUBAGENTS: "true"
@@ -34,92 +42,92 @@ services:
       ENABLE_TITLE_GENERATION: "false"
       ENABLE_TAGS_GENERATION: "false"
       ENABLE_FOLLOW_UP_GENERATION: "false"
-      WHISPER_MODEL: "base"                       # local STT for voice
-      RESET_CONFIG_ON_START: "true"              # re-seed connections from env each boot
-      # shared web search (model-agnostic) via Tavily — scraping happens on Tavily's
-      # servers, so our home IP is never used (unlike SearXNG). Claude uses its own native search.
+      WHISPER_MODEL: "base"
+      RESET_CONFIG_ON_START: "true"
       ENABLE_WEB_SEARCH: "true"
       WEB_SEARCH_ENGINE: "tavily"
       TAVILY_API_KEY: "${TAVILY_API_KEY}"
       WEB_SEARCH_RESULT_COUNT: "5"
-      BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL: "true"   # inject Tavily's clean results directly (skip slow CPU rerank)
-      BYPASS_WEB_SEARCH_WEB_LOADER: "true"                # use Tavily's returned content; don't re-fetch each page (was ~82s)
-      # OWUI only runs its forced web-search RAG when a model's function-calling is "legacy".
-      # Our adapters are plain chat endpoints (no OWUI-native tools), so default every model to
-      # legacy → the web-search toggle actually fires. (Harmless for the adapters' internal tools.)
+      BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL: "true"
+      BYPASS_WEB_SEARCH_WEB_LOADER: "true"
       DEFAULT_MODEL_PARAMS: '{"function_calling":"legacy"}'
+      # NATIVE terminal feature: register the host owui-terminal PTY service as an OWUI terminal server.
+      TERMINAL_SERVER_CONNECTIONS: '[{"id":"aibo","name":"aibo (host shell)","url":"http://host.docker.internal:7681","auth_type":"bearer","key":"${TERMINAL_TOKEN}","enabled":true,"access_control":null}]'
     depends_on:
       - owui-hermes
       - owui-claude
       - owui-opencode
     networks:
-      - default          # reach the adapters by service name
-      - apps             # reach the artifacts board (http://artifacts:8080) + publish/notify
+      - default
+      - apps
 
   owui-hermes:
     build: ./owui-hermes
     image: agent-hub/owui-hermes
     container_name: owui-hermes
+    profiles: ["hub"]                              # the single Hermes brain lives on the hub only
     restart: unless-stopped
-    expose:
-      - "9211"
+    ports:
+      - "${ADAPTER_BIND:-127.0.0.1}:9211:9211"
     extra_hosts:
-      - "host.docker.internal:host-gateway"      # reach host Hermes :9119
+      - "host.docker.internal:host-gateway"
     environment:
       HERMES_BASE: "http://host.docker.internal:9119"
       HERMES_DASH_USER: "${HERMES_DASH_USER}"
       HERMES_DASH_PW: "${HERMES_DASH_PW}"
       ADAPTER_KEY: "${ADAPTER_KEY}"
       PORT: "9211"
-      IDLE_TIMEOUT: "300"          # give slow/agentic tools (e.g. computer_use) more room before ending
+      IDLE_TIMEOUT: "300"
       FF_STATE_DIR: "/ffstate"
     volumes:
-      - ./ff-state:/ffstate                      # FF4: durable mirrored-run registry
+      - ./ff-state:/ffstate
 
   owui-claude:
     build: ./owui-claude
     image: agent-hub/owui-claude
     container_name: owui-claude
+    profiles: ["hub", "node"]                      # runs on both hub and worker nodes
     restart: unless-stopped
-    expose:
-      - "9212"
-    user: "1000:1000"                 # = host user beastblaster; files created keep correct ownership
-    # (no working_dir override — node runs server.mjs from /app; the AGENT's cwd is WORKSPACE below)
+    ports:
+      - "${ADAPTER_BIND:-127.0.0.1}:9212:9212"
+    user: "${DOCKER_USER:-1000:1000}"
     volumes:
-      - /home/beastblaster:/home/beastblaster   # full host home access (agents work on real files)
-      - ./ff-state:/ffstate                     # FF4: durable mirrored-run registry (survives restart)
+      - ${WORKSPACE_HOST:-/home/beastblaster}:${WORKSPACE:-/home/beastblaster}
+      - ./ff-state:/ffstate
     environment:
-      CLAUDE_CODE_OAUTH_TOKEN: "${CLAUDE_CODE_OAUTH_TOKEN}"   # subscription OAuth (NOT ANTHROPIC_API_KEY)
+      CLAUDE_CODE_OAUTH_TOKEN: "${CLAUDE_CODE_OAUTH_TOKEN}"
       ADAPTER_KEY: "${ADAPTER_KEY}"
       FF_STATE_DIR: "/ffstate"
       OWUI_CLAUDE_PORT: "9212"
       CLAUDE_MODELS: "${CLAUDE_MODELS}"
       CLAUDE_MODEL: "${CLAUDE_MODEL}"
-      WORKSPACE: "/home/beastblaster"
-      HOME: "/home/node"              # container-isolated CLI config (uid 1000 owns /home/node)
+      WORKSPACE: "${WORKSPACE:-/home/beastblaster}"
+      HOME: "/home/node"
 
   opencode:
     build: ./opencode
     image: agent-hub/opencode
     container_name: opencode
+    profiles: ["hub", "node"]
     restart: unless-stopped
     expose:
       - "4096"
-    user: "1000:1000"                 # = host user; file ops keep correct ownership
-    working_dir: /home/beastblaster
+    user: "${DOCKER_USER:-1000:1000}"
+    working_dir: ${WORKSPACE:-/home/beastblaster}
     volumes:
-      - /home/beastblaster:/home/beastblaster   # full host home access
+      - ${WORKSPACE_HOST:-/home/beastblaster}:${WORKSPACE:-/home/beastblaster}
     environment:
-      OPENCODE_API_KEY: "${OPENCODE_API_KEY}"   # opencode Zen provider (seeded into auth.json)
-      HOME: "/home/node"              # container-isolated opencode config/auth (uid 1000 owns /home/node)
+      OPENCODE_API_KEY: "${OPENCODE_API_KEY}"
+      HOME: "/home/node"
 
   owui-opencode:
     build: ./owui-opencode
     image: agent-hub/owui-opencode
     container_name: owui-opencode
+    profiles: ["hub", "node"]
     restart: unless-stopped
-    expose:
-      - "9213"
+    ports:
+      - "${ADAPTER_BIND:-127.0.0.1}:9213:9213"
     environment:
       OPENCODE_BASE: "http://opencode:4096"
       ADAPTER_KEY: "${ADAPTER_KEY}"
@@ -127,28 +135,29 @@ services:
       OPENCODE_MODELS: "${OPENCODE_MODELS}"
       FF_STATE_DIR: "/ffstate"
     volumes:
-      - ./ff-state:/ffstate                      # FF4: durable mirrored-run registry
+      - ./ff-state:/ffstate
     depends_on:
       - opencode
 
   ollama:
     image: ollama/ollama
     container_name: ollama
+    profiles: ["hub"]
     restart: unless-stopped
     ports:
-      - "127.0.0.1:11434:11434"                  # host-local only; reserved for Phase-3 local LLM
+      - "127.0.0.1:11434:11434"
     volumes:
       - ollama:/root/.ollama
 
-  # ONE shared MCP server: publish_artifact + notify tools for ALL agents (claude/hermes/opencode).
-  # Tool logic lives here; each agent points at it once. MCP tool calls render as native tool cards.
+  # ONE shared MCP server: publish_artifact + notify for ALL agents. Tool logic lives here.
   mcp-tools:
     build: ./mcp-tools
     image: agent-hub/mcp-tools
     container_name: mcp-tools
+    profiles: ["hub"]
     restart: unless-stopped
     ports:
-      - "127.0.0.1:8009:8000"                    # host Hermes reaches http://127.0.0.1:8009/mcp
+      - "127.0.0.1:8009:8000"
     environment:
       PORT: "8000"
       ARTIFACTS_API: "http://artifacts:8080/api/publish"
@@ -158,18 +167,39 @@ services:
       NTFY_TOPIC: "${NTFY_TOPIC}"
       NTFY_TOKEN: "${NTFY_TOKEN}"
     networks:
-      - default                                  # owui-claude / opencode reach http://mcp-tools:8000/mcp
-      - apps                                      # reach artifacts board + ntfy
+      - default
+      - apps
+
+  # Heartbeats THIS machine into the OWUI machine selector (node registry). Same service on hub + node;
+  # env decides which machine it registers and which hub it points at.
+  registrar:
+    build: ./node
+    image: agent-hub/registrar
+    container_name: agent-hub-registrar
+    profiles: ["hub", "node"]
+    restart: unless-stopped
+    environment:
+      HUB_REGISTER_URL: "${HUB_REGISTER_URL:-http://open-webui:8080/api/nodes/register}"
+      NODE_HUB_TOKEN: "${NODE_HUB_TOKEN:-}"
+      NODE_LABEL: "${NODE_LABEL:-aibo}"
+      NODE_URL: "${NODE_URL:-http://open-webui:8080}"
+      NODE_API_URL: "${NODE_API_URL:-http://open-webui:8080}"
+      NODE_TOKEN: "${NODE_TOKEN:-}"
+      NODE_CAPABILITIES: "${NODE_CAPABILITIES:-terminal,claude,opencode}"
+      NODE_MODELS: "${NODE_MODELS:-}"
+      TERMINAL_ID: "${TERMINAL_ID:-}"
+      TERMINAL_NAME: "${TERMINAL_NAME:-}"
+      TERMINAL_URL: "${TERMINAL_URL:-}"
+      TERMINAL_KEY: "${TERMINAL_KEY:-}"
+      HEARTBEAT_SECONDS: "${HEARTBEAT_SECONDS:-30}"
 
 volumes:
   open-webui:
-    external: true          # reuse existing volume (preserves chat history)
+    external: true
   ollama:
-    external: true          # reuse existing volume
-  owui-claude-workspace: {} # new, compose-managed
-  opencode-workspace: {}    # new, compose-managed
+    external: true
 
 networks:
-  default:                  # the agent-hub stack's own network (adapters ↔ OWUI)
+  default:
   apps:
-    external: true          # shared 'apps' network → OWUI can reach the artifacts board (publish/notify)
+    external: true

@@ -1,0 +1,8 @@
+# Fork override — run the Agent-Hub OWUI FORK instead of upstream :main.
+#   Fork:   docker compose -f docker-compose.yml -f docker-compose.fork.yml up -d open-webui
+#   Stock:  docker compose up -d open-webui        (instant rollback)
+# All other env (terminal server, host.docker.internal, pinned secret) lives in the base compose,
+# so this override only swaps the image. Chats preserved (same external volume).
+services:
+  open-webui:
+    image: agent-hub/open-webui:v0.11.0-fork      # built by owui-fork/build.sh (E0 + terminal patch)

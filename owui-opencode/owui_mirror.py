@@ -51,12 +51,16 @@ class Mirror:
         now = time.monotonic()
         if now - self._last > _MS:
             self._last = now
-            threading.Thread(target=self._post, args=(content,), daemon=True).start()
+            # Synchronous (was a daemon thread): update() and done() run on the SAME streaming thread,
+            # so posts stay strictly ordered. The old threaded version could let a stale update land
+            # AFTER done() and overwrite the final content → "last words missing" / "response gone on
+            # reload". Throttled to _MS, so the inline HTTP cost is a small periodic hitch, not per-token.
+            self._post(content)
 
     def done(self, content):
         if not self.on:
             return
-        self._post(content)  # final write, synchronous
+        self._post(content)  # final authoritative write (always last, same thread)
 
 
 # ── FF4: durable mirrored runs ──

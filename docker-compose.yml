@@ -71,6 +71,7 @@ services:
       HERMES_DASH_PW: "${HERMES_DASH_PW}"
       ADAPTER_KEY: "${ADAPTER_KEY}"
       PORT: "9211"
+      IDLE_TIMEOUT: "300"          # give slow/agentic tools (e.g. computer_use) more room before ending
       FF_STATE_DIR: "/ffstate"
     volumes:
       - ./ff-state:/ffstate                      # FF4: durable mirrored-run registry

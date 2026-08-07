@@ -184,16 +184,18 @@ class Mirror {
     this.cid = cid; this.mid = mid; this.jwt = jwt;
     this.on = !!(cid && mid && jwt);
     this.last = 0; this.pending = null; this.timer = null;
+    this.chain = Promise.resolve();   // serialize writes so a stale one can't overwrite the final
   }
-  async _post(content) {
-    try {
-      await fetch(`${OWUI_BASE}/api/v1/chats/${this.cid}/messages/${this.mid}`, {
-        method: "POST",
-        headers: { "Authorization": `Bearer ${this.jwt}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ content }),
-      });
-    } catch { /* OWUI unreachable — best-effort mirror */ }
+  _rawPost(content) {
+    return fetch(`${OWUI_BASE}/api/v1/chats/${this.cid}/messages/${this.mid}`, {
+      method: "POST",
+      headers: { "Authorization": `Bearer ${this.jwt}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ content }),
+    }).catch(() => {});   // OWUI unreachable — best-effort mirror
   }
+  // Chain every post so they land in call order → the final done() write always wins (prevents the
+  // "last words missing" / "response gone on reload" race where a stale update overwrote the final).
+  _post(content) { this.chain = this.chain.then(() => this._rawPost(content)); return this.chain; }
   update(content) {
     if (!this.on) return;
     this.pending = content;

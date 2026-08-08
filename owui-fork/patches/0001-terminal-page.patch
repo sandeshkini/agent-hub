@@ -26,6 +26,119 @@ index 55613ac..798b2cf 100644
  app.include_router(calendar.router, prefix='/api/v1/calendars', tags=['calendars'])
  
  # SCIM 2.0 API for identity management
+diff --git a/backend/open_webui/models/chats.py b/backend/open_webui/models/chats.py
+index 26e9dd3..598345d 100644
+--- a/backend/open_webui/models/chats.py
++++ b/backend/open_webui/models/chats.py
+@@ -223,6 +223,29 @@ class ChatResponse(BaseModel):
+         return value if isinstance(value, dict) else {}
+ 
+ 
++def _primary_model_id(models) -> str | None:
++    # LOCAL PATCH (agent-hub fork, E10): the chat's primary model id, so the client can attribute a chat
++    # to a machine (node registry maps model id -> machine) without loading each chat. Source is the chat
++    # JSON's `models` array (json_extract may hand it back as a JSON string), take the first entry.
++    if models is None:
++        return None
++    if isinstance(models, str):
++        try:
++            models = json.loads(models)
++        except Exception:
++            return models or None
++    if isinstance(models, (list, tuple)):
++        return str(models[0]) if models else None
++    if isinstance(models, dict):
++        if not models:
++            return None
++        try:
++            return max(models.items(), key=lambda kv: kv[1] if isinstance(kv[1], (int, float)) else 0)[0]
++        except Exception:
++            return next(iter(models), None)
++    return None
++
++
+ class ChatTitleIdResponse(BaseModel):
+     id: str
+     title: str
+@@ -231,6 +254,7 @@ class ChatTitleIdResponse(BaseModel):
+     last_read_at: int | None = None
+     snippet: str | None = None
+     active: bool = False
++    model_id: str | None = None  # LOCAL PATCH (E10): primary model → machine attribution in the UI
+ 
+ 
+ class SharedChatResponse(BaseModel):
+@@ -1304,9 +1328,9 @@ class ChatTable:
+         db: AsyncSession | None = None,
+     ) -> list[ChatTitleIdResponse]:
+         async with get_async_db_context(db) as session:
+-            stmt = select(Chat.id, Chat.title, Chat.updated_at, Chat.created_at, Chat.last_read_at).filter_by(
+-                user_id=user_id
+-            )
++            stmt = select(
++                Chat.id, Chat.title, Chat.updated_at, Chat.created_at, Chat.last_read_at, Chat.chat['models']
++            ).filter_by(user_id=user_id)  # LOCAL PATCH (E10): + chat JSON models[] for machine attribution
+             stmt = stmt.where(Chat.meta['internal'].as_boolean().is_not(True))
+             if not include_archived:
+                 stmt = stmt.filter_by(archived=False)
+@@ -1344,6 +1368,8 @@ class ChatTable:
+                         'updated_at': chat[2],
+                         'created_at': chat[3],
+                         'last_read_at': chat[4],
++                        # LOCAL PATCH (E10): primary model when the query selected Chat.models (6th col)
++                        'model_id': _primary_model_id(chat[5]) if len(chat) > 5 else None,
+                     }
+                 )
+                 for chat in all_chats
+@@ -1362,9 +1388,9 @@ class ChatTable:
+         db: AsyncSession | None = None,
+     ) -> list[ChatTitleIdResponse]:
+         async with get_async_db_context(db) as session:
+-            stmt = select(Chat.id, Chat.title, Chat.updated_at, Chat.created_at, Chat.last_read_at).filter_by(
+-                user_id=user_id
+-            )
++            stmt = select(
++                Chat.id, Chat.title, Chat.updated_at, Chat.created_at, Chat.last_read_at, Chat.chat['models']
++            ).filter_by(user_id=user_id)  # LOCAL PATCH (E10): + chat JSON models[] for machine attribution
+             stmt = stmt.where(Chat.meta['internal'].as_boolean().is_not(True))
+ 
+             if not include_folders:
+@@ -1394,6 +1420,8 @@ class ChatTable:
+                         'updated_at': chat[2],
+                         'created_at': chat[3],
+                         'last_read_at': chat[4],
++                        # LOCAL PATCH (E10): primary model when the query selected Chat.models (6th col)
++                        'model_id': _primary_model_id(chat[5]) if len(chat) > 5 else None,
+                     }
+                 )
+                 for chat in all_chats
+@@ -1719,6 +1747,8 @@ class ChatTable:
+                         'updated_at': chat[2],
+                         'created_at': chat[3],
+                         'last_read_at': chat[4],
++                        # LOCAL PATCH (E10): primary model when the query selected Chat.models (6th col)
++                        'model_id': _primary_model_id(chat[5]) if len(chat) > 5 else None,
+                     }
+                 )
+                 for chat in all_chats
+@@ -1976,6 +2006,8 @@ class ChatTable:
+                         'updated_at': chat[2],
+                         'created_at': chat[3],
+                         'last_read_at': chat[4],
++                        # LOCAL PATCH (E10): primary model when the query selected Chat.models (6th col)
++                        'model_id': _primary_model_id(chat[5]) if len(chat) > 5 else None,
+                     }
+                 )
+                 for chat in all_chats
+@@ -2130,6 +2162,8 @@ class ChatTable:
+                         'updated_at': chat[2],
+                         'created_at': chat[3],
+                         'last_read_at': chat[4],
++                        # LOCAL PATCH (E10): primary model when the query selected Chat.models (6th col)
++                        'model_id': _primary_model_id(chat[5]) if len(chat) > 5 else None,
+                     }
+                 )
+                 for chat in all_chats
 diff --git a/backend/open_webui/routers/agent_answer.py b/backend/open_webui/routers/agent_answer.py
 new file mode 100644
 index 0000000..ee17b5d
@@ -761,7 +874,7 @@ index ce1eda9..d42ae3d 100644
  		// Fit after a frame so the container has dimensions
  		requestAnimationFrame(() => {
 diff --git a/src/lib/components/layout/Sidebar.svelte b/src/lib/components/layout/Sidebar.svelte
-index f8ac62b..3d8fd58 100644
+index f8ac62b..3b4d546 100644
 --- a/src/lib/components/layout/Sidebar.svelte
 +++ b/src/lib/components/layout/Sidebar.svelte
 @@ -74,6 +74,7 @@
@@ -772,26 +885,43 @@ index f8ac62b..3d8fd58 100644
  	import SearchModal from './SearchModal.svelte';
  	import FolderModal from './Sidebar/Folders/FolderModal.svelte';
  	import PinnedModelList from './Sidebar/PinnedModelList.svelte';
-@@ -83,6 +84,9 @@
+@@ -83,6 +84,12 @@
  	import CodeIcon from './Sidebar/icons/Code.svelte';
  	import EditPencilIcon from './Sidebar/icons/EditPencil.svelte';
  	import NotesIcon from './Sidebar/icons/Notes.svelte';
 +	import TerminalIcon from '$lib/components/icons/CommandLine.svelte'; // LOCAL PATCH
 +	import InboxIcon from '$lib/components/icons/ArchiveBox.svelte'; // LOCAL PATCH: fork terminal
 +	import MachineSelector from './Sidebar/MachineSelector.svelte'; // LOCAL PATCH (E4): machine selector
++	// LOCAL PATCH (E10): filter the chat list to the selected machine (null = All machines).
++	import { selectedNodeId, nodes, hubNode, machineIdForModel, machineForTerminal } from '$lib/utils/machineSelector';
++	import MachineChip from './Sidebar/MachineChip.svelte';
  	import SearchIcon from './Sidebar/icons/Search.svelte';
  	import Sidebar from '../icons/Sidebar.svelte';
  	import WorkspaceIcon from './Sidebar/icons/Workspace.svelte';
-@@ -94,7 +98,7 @@
+@@ -94,7 +101,21 @@
  	import MoreHorizontalIcon from './Sidebar/icons/MoreHorizontal.svelte';
  
  	const BREAKPOINT = 768;
 -	const DEFAULT_PINNED_ITEMS = ['notes', 'workspace'];
 +	const DEFAULT_PINNED_ITEMS = ['inbox', 'notes', 'workspace', 'terminal']; // LOCAL PATCH
++
++	// LOCAL PATCH (E10): chats scoped to the selected machine (null = All machines → show everything).
++	// Attribution is by the chat's primary model (node registry maps model id → machine).
++	$: visibleChats = $selectedNodeId
++		? ($chats ?? []).filter(
++				(c) => machineIdForModel(c?.model_id, $nodes, $hubNode) === $selectedNodeId
++			)
++		: ($chats ?? []);
++
++	// LOCAL PATCH (E10): terminals scoped to the selected machine (by the shell's serverId → node).
++	const termMachine = (t) => machineForTerminal(t?.serverId, $nodes) ?? $hubNode;
++	$: visibleTerminals = $selectedNodeId
++		? ($terminalSessions ?? []).filter((t) => (termMachine(t)?.id ?? null) === $selectedNodeId)
++		: ($terminalSessions ?? []);
  
  	let scrollTop = 0;
  
-@@ -125,6 +129,7 @@
+@@ -125,6 +146,7 @@
  	let showPinnedModels = false;
  	let showPinnedNotes = false;
  	let showChannels = false;
@@ -799,7 +929,7 @@ index f8ac62b..3d8fd58 100644
  	let showFolders = false;
  	let showSharedFolders = false;
  	let showChatsMenu = false;
-@@ -175,6 +180,9 @@
+@@ -175,6 +197,9 @@
  				);
  			case 'playground':
  				return $user?.role === 'admin';
@@ -809,7 +939,7 @@ index f8ac62b..3d8fd58 100644
  			default:
  				return false;
  		}
-@@ -182,8 +190,10 @@
+@@ -182,8 +207,10 @@
  
  	const getMenuItemMeta = (id) => {
  		const items = {
@@ -820,7 +950,7 @@ index f8ac62b..3d8fd58 100644
  			automations: { label: 'Automations', href: '/automations', iconType: 'automations' },
  			calendar: { label: 'Calendar', href: '/calendar', iconType: 'calendar' },
  			playground: { label: 'Playground', href: '/playground', iconType: 'playground' }
-@@ -193,6 +203,8 @@
+@@ -193,6 +220,8 @@
  
  	const menuItemPathPrefixes = {
  		notes: '/notes',
@@ -829,7 +959,7 @@ index f8ac62b..3d8fd58 100644
  		workspace: '/workspace',
  		calendar: '/calendar',
  		automations: '/automations',
-@@ -1014,6 +1026,7 @@
+@@ -1014,6 +1043,7 @@
  					</Tooltip>
  				</div>
  
@@ -837,7 +967,7 @@ index f8ac62b..3d8fd58 100644
  				{#each pinnedItems as itemId (itemId)}
  					{@const meta = getMenuItemMeta(itemId)}
  					{#if meta && isMenuItemVisible(itemId)}
-@@ -1049,6 +1062,10 @@
+@@ -1049,6 +1079,10 @@
  											<CalendarIcon className="size-4" strokeWidth="1.5" />
  										{:else if itemId === 'playground'}
  											<CodeIcon className="size-4" strokeWidth="1.5" />
@@ -848,7 +978,7 @@ index f8ac62b..3d8fd58 100644
  										{/if}
  									</div>
  								</a>
-@@ -1259,6 +1276,10 @@
+@@ -1259,6 +1293,10 @@
  												<CalendarIcon className="size-4" strokeWidth="1.5" />
  											{:else if itemId === 'playground'}
  												<CodeIcon className="size-4" strokeWidth="1.5" />
@@ -859,7 +989,7 @@ index f8ac62b..3d8fd58 100644
  											{/if}
  										</div>
  
-@@ -1272,6 +1293,9 @@
+@@ -1272,6 +1310,9 @@
  					</div>
  				</div>
  
@@ -869,7 +999,7 @@ index f8ac62b..3d8fd58 100644
  				{#if ($models ?? []).length > 0 && (($settings?.pinnedModels ?? []).length > 0 || $config?.default_pinned_models)}
  					<SidebarSection
  						id="sidebar-models"
-@@ -1337,6 +1361,27 @@
+@@ -1337,6 +1378,30 @@
  					</SidebarSection>
  				{/if}
  
@@ -883,11 +1013,14 @@ index f8ac62b..3d8fd58 100644
 +					onAdd={() => { newTerminalSession(); goto('/terminal'); itemClickHandler(); }}
 +					onAddLabel={$i18n.t('New Terminal')}
 +				>
-+					{#each $terminalSessions as t (t.id)}
++					{#each visibleTerminals as t (t.id)}
 +						<div class="group w-full flex justify-between items-center rounded-xl px-2 py-[6px] {$activeTerminalId === t.id ? 'bg-black/[0.035] dark:bg-white/[0.045]' : 'hover:bg-gray-50 dark:hover:bg-gray-900'}">
 +							<a class="flex items-center gap-2 flex-1 min-w-0 cursor-pointer" href="/terminal" on:click={(e) => { e.preventDefault(); activeTerminalId.set(t.id); goto('/terminal'); itemClickHandler(); }}>
 +								<div class="size-1.5 shrink-0 rounded-full bg-green-500" title={$i18n.t('Running')}></div>
-+								<div class="text-left overflow-hidden w-full h-[20px] truncate">{t.name}</div>
++								<div class="text-left overflow-hidden flex-1 min-w-0 h-[20px] truncate">{t.name}</div>
++								{#if !$selectedNodeId && $nodes.length > 1 && termMachine(t)?.label}
++									<MachineChip label={termMachine(t).label} online={termMachine(t)?.online ?? true} />
++								{/if}
 +							</a>
 +							<button class="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-red-500 transition px-1 shrink-0" title={$i18n.t('Close')} on:click|stopPropagation={() => closeTerminalSession(t.id)}>✕</button>
 +						</div>
@@ -897,19 +1030,57 @@ index f8ac62b..3d8fd58 100644
  				{#if $config?.features?.enable_folders && ($user?.role === 'admin' || ($user?.permissions?.features?.folders ?? true))}
  					<SidebarSection
  						id="sidebar-folders"
+@@ -1586,8 +1651,8 @@
+ 					<div class=" flex-1 flex flex-col overflow-y-auto scrollbar-hidden">
+ 						<div class="pt-1.5">
+ 							{#if $chats}
+-								{#each $chats as chat, idx (`chat-${chat?.id ?? idx}`)}
+-									{#if idx === 0 || (idx > 0 && chat.time_range !== $chats[idx - 1].time_range)}
++								{#each visibleChats as chat, idx (`chat-${chat?.id ?? idx}`)}
++									{#if idx === 0 || (idx > 0 && chat.time_range !== visibleChats[idx - 1].time_range)}
+ 										<div
+ 											class="w-full pl-2.5 text-xs text-gray-500 dark:text-gray-500 font-normal {idx ===
+ 											0
+@@ -1624,6 +1689,8 @@
+ 										updatedAt={chat.updated_at}
+ 										lastReadAt={chat.last_read_at}
+ 										active={chat.active ?? false}
++										modelId={chat.model_id}
++										showMachine={!$selectedNodeId && $nodes.length > 1}
+ 										{shiftKey}
+ 										selected={selectedChatId === chat.id}
+ 										on:select={() => {
 diff --git a/src/lib/components/layout/Sidebar/ChatItem.svelte b/src/lib/components/layout/Sidebar/ChatItem.svelte
-index 3e9602b..73cd455 100644
+index 3e9602b..e2249b0 100644
 --- a/src/lib/components/layout/Sidebar/ChatItem.svelte
 +++ b/src/lib/components/layout/Sidebar/ChatItem.svelte
-@@ -18,6 +18,7 @@
+@@ -18,6 +18,10 @@
  	import { toast } from 'svelte-sonner';
  	import { goto, invalidate, invalidateAll } from '$app/navigation';
  	import { onMount, getContext, createEventDispatcher, tick } from 'svelte';
 +	import { chatSummaries } from '$lib/utils/agentInbox'; // LOCAL PATCH
++	// LOCAL PATCH (E10): machine attribution chip (which machine this chat ran on).
++	import { nodes, hubNode, machineForModel, machineIdForModel } from '$lib/utils/machineSelector';
++	import MachineChip from './MachineChip.svelte';
  	import { LinkPreview } from 'bits-ui';
  	import {
  		archiveChatById,
-@@ -608,13 +609,19 @@
+@@ -81,6 +85,14 @@
+ 
+ 	export let onDragEnd = () => {};
+ 
++	// LOCAL PATCH (E10): machine attribution. modelId = chat's primary model; showMachine = render the
++	// chip (only in the All-machines view, where telling machines apart matters).
++	export let modelId: string | null = null;
++	export let showMachine = false;
++	$: _machineNode = machineForModel(modelId, $nodes) ?? ($nodes.find((n) => n.id === machineIdForModel(modelId, $nodes, $hubNode)) ?? null);
++	$: machineLabel = _machineNode?.label ?? '';
++	$: machineOnline = _machineNode?.online ?? true;
++
+ 	function formatTimeAgo(timestamp: number): string {
+ 		const now = Date.now();
+ 		const diff = now - timestamp * 1000; // timestamp is in seconds
+@@ -608,13 +620,23 @@
  							<div class="size-1.5 bg-sky-500 rounded-full"></div>
  						</div>
  					{/if}
@@ -933,9 +1104,47 @@ index 3e9602b..73cd455 100644
 +							<!-- LOCAL PATCH: show the full summary (status line, capped ~140 chars server-side) -->
 +							<div class="text-xs text-gray-400 dark:text-gray-500 leading-snug break-words whitespace-normal">{$chatSummaries[id]}</div>
 +						{/if}
++						{#if showMachine && machineLabel}
++							<!-- LOCAL PATCH (E10): machine tag, shown in the All-machines view -->
++							<div class="mt-0.5"><MachineChip label={machineLabel} online={machineOnline} /></div>
++						{/if}
  					</div>
  				</div>
  
+diff --git a/src/lib/components/layout/Sidebar/MachineChip.svelte b/src/lib/components/layout/Sidebar/MachineChip.svelte
+new file mode 100644
+index 0000000..3fe0058
+--- /dev/null
++++ b/src/lib/components/layout/Sidebar/MachineChip.svelte
+@@ -0,0 +1,28 @@
++<script lang="ts">
++	// LOCAL PATCH (agent-hub fork, E10): a small, subtle machine tag (colored dot + short label) shown on
++	// chat / inbox / terminal rows so you can tell which machine a thing ran on at a glance. Deterministic
++	// hue per label so each machine keeps a stable colour.
++	export let label: string = '';
++	export let online: boolean = true;
++
++	let hue = 210;
++	$: {
++		let h = 0;
++		const s = label || '';
++		for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
++		hue = h % 360;
++	}
++</script>
++
++{#if label}
++	<span
++		class="inline-flex items-center gap-1 shrink-0 text-[10px] leading-none px-1.5 py-0.5 rounded-full bg-gray-100 dark:bg-gray-850 text-gray-500 dark:text-gray-400"
++		title={`Machine: ${label}`}
++	>
++		<span
++			class="size-1.5 rounded-full {online ? '' : 'opacity-40'}"
++			style={`background:hsl(${hue} 60% 55%)`}
++		></span>
++		{label}
++	</span>
++{/if}
 diff --git a/src/lib/components/layout/Sidebar/MachineSelector.svelte b/src/lib/components/layout/Sidebar/MachineSelector.svelte
 new file mode 100644
 index 0000000..8efbd67
@@ -1082,10 +1291,10 @@ index 0000000..b5b9113
 +}
 diff --git a/src/lib/utils/agentTerminals.ts b/src/lib/utils/agentTerminals.ts
 new file mode 100644
-index 0000000..cbce732
+index 0000000..87b8e48
 --- /dev/null
 +++ b/src/lib/utils/agentTerminals.ts
-@@ -0,0 +1,176 @@
+@@ -0,0 +1,182 @@
 +// LOCAL PATCH (agent-hub fork): shared terminal-session store — now CROSS-DEVICE SYNCED.
 +// Terminal sessions live in the left sidebar (like chats) and drive the /terminal page. The list is
 +// cached in localStorage for instant paint AND persisted server-side (fork `/api/v1/terminal-sessions`)
@@ -1096,6 +1305,7 @@ index 0000000..cbce732
 +import { writable, get } from 'svelte/store';
 +import { browser } from '$app/environment';
 +import { WEBUI_API_BASE_URL } from '$lib/constants';
++import { selectedTerminalId } from '$lib/stores'; // LOCAL PATCH (E10): stamp each shell's machine
 +
 +export type TerminalSession = {
 +	id: string;
@@ -1218,7 +1428,12 @@ index 0000000..cbce732
 +
 +export const newTerminalSession = (): string => {
 +	const list = get(terminalSessions);
-+	const s: TerminalSession = { id: uid(), name: `Terminal ${list.length + 1}`, createdAt: Date.now() };
++	const s: TerminalSession = {
++		id: uid(),
++		name: `Terminal ${list.length + 1}`,
++		createdAt: Date.now(),
++		serverId: get(selectedTerminalId) || undefined // LOCAL PATCH (E10): which machine this shell runs on
++	};
 +	terminalSessions.set([...list, s]);
 +	activeTerminalId.set(s.id);
 +	return s.id;
@@ -1264,10 +1479,10 @@ index 0000000..cbce732
 +};
 diff --git a/src/lib/utils/machineSelector.ts b/src/lib/utils/machineSelector.ts
 new file mode 100644
-index 0000000..b4813a2
+index 0000000..c027323
 --- /dev/null
 +++ b/src/lib/utils/machineSelector.ts
-@@ -0,0 +1,82 @@
+@@ -0,0 +1,117 @@
 +// LOCAL PATCH (agent-hub fork, E4): machine (node) selector state.
 +// Reads the fork node registry (/api/nodes) — the source of truth for which machines exist, which
 +// models each serves, and each machine's terminal server. Selecting a machine scopes BOTH the chat
@@ -1343,6 +1558,41 @@ index 0000000..b4813a2
 +	$n && Array.isArray($n.models) && $n.models.length ? new Set($n.models) : null
 +);
 +
++// ── E10: machine attribution (which machine a chat/terminal belongs to) ──
++// A model id without a "<machine>." prefix (e.g. `claude-sonnet-5`, `opencode/glm-5.2`, `hermes`) is a
++// LOCAL/hub model; a prefixed id (e.g. `mb.claude-sonnet-5`) belongs to a remote node.
++const isLocalModelId = (m: string): boolean => !/^[a-z0-9-]+\.[a-z]/i.test(m || '');
++
++// The hub node = the one serving local (unprefixed) models; fallback to first online node.
++export const hubNode = derived(nodes, ($nodes) =>
++	$nodes.find((n) => (n.models || []).some(isLocalModelId)) ??
++	$nodes.find((n) => n.online) ??
++	$nodes[0] ??
++	null
++);
++
++// The node that serves a given model id (exact match against each node's advertised model list).
++export function machineForModel(modelId: string | null | undefined, nodesList: Node[]): Node | null {
++	if (!modelId) return null;
++	return nodesList.find((n) => Array.isArray(n.models) && n.models.includes(modelId)) ?? null;
++}
++
++// The node that owns a given terminal-server id (each node advertises terminal.id).
++export function machineForTerminal(serverId: string | null | undefined, nodesList: Node[]): Node | null {
++	if (!serverId) return null;
++	return nodesList.find((n) => n.terminal && n.terminal.id === serverId) ?? null;
++}
++
++// The machine id a chat belongs to, given its primary model. Unknown/local models → the hub node.
++export function machineIdForModel(
++	modelId: string | null | undefined,
++	nodesList: Node[],
++	hub: Node | null
++): string | null {
++	const n = machineForModel(modelId, nodesList);
++	return n ? n.id : hub?.id ?? null;
++}
++
 +// Pick a machine: scope models + point the terminal at that machine's terminal server.
 +export function selectMachine(id: string | null) {
 +	selectedNodeId.set(id);
@@ -1352,10 +1602,10 @@ index 0000000..b4813a2
 +}
 diff --git a/src/routes/(app)/inbox/+page.svelte b/src/routes/(app)/inbox/+page.svelte
 new file mode 100644
-index 0000000..074da74
+index 0000000..feb3524
 --- /dev/null
 +++ b/src/routes/(app)/inbox/+page.svelte
-@@ -0,0 +1,126 @@
+@@ -0,0 +1,144 @@
 +<script lang="ts">
 +	// LOCAL PATCH (agent-hub fork): E2 Inbox with real-time smart summaries. Polls /api/inbox (chats +
 +	// unread/running state + LLM one-line summaries from local llama3.2:3b, regenerated when a chat
@@ -1365,6 +1615,9 @@ index 0000000..074da74
 +	import { WEBUI_API_BASE_URL } from '$lib/constants';
 +	import { showSidebar, mobile } from '$lib/stores';
 +	import { terminalSessions, activeTerminalId } from '$lib/utils/agentTerminals';
++	// LOCAL PATCH (E10): machine attribution + filter in the inbox.
++	import { selectedNodeId, nodes, hubNode, machineIdForModel, machineForModel, machineForTerminal } from '$lib/utils/machineSelector';
++	import MachineChip from '$lib/components/layout/Sidebar/MachineChip.svelte';
 +	import Spinner from '$lib/components/common/Spinner.svelte';
 +	import MenuLines from '$lib/components/icons/MenuLines.svelte';
 +
@@ -1396,8 +1649,21 @@ index 0000000..074da74
 +
 +	const st = (c: any) =>
 +		c.active ? 'running' : (c.updated_at ?? 0) > (c.last_read_at ?? 0) ? 'unread' : 'read';
-+	$: needs = chats.filter((c) => st(c) !== 'read');
-+	$: recent = chats.filter((c) => st(c) === 'read');
++
++	// LOCAL PATCH (E10): scope to the selected machine (null = All machines). Attribution by model.
++	$: mchats = $selectedNodeId
++		? chats.filter((c) => machineIdForModel(c?.model_id, $nodes, $hubNode) === $selectedNodeId)
++		: chats;
++	$: needs = mchats.filter((c) => st(c) !== 'read');
++	$: recent = mchats.filter((c) => st(c) === 'read');
++
++	const chatMachine = (c: any) =>
++		machineForModel(c?.model_id, $nodes) ??
++		($nodes.find((n) => n.id === machineIdForModel(c?.model_id, $nodes, $hubNode)) ?? null);
++	const termMachine = (t: any) => machineForTerminal(t?.serverId, $nodes) ?? $hubNode;
++	$: mterminals = $selectedNodeId
++		? $terminalSessions.filter((t) => (termMachine(t)?.id ?? null) === $selectedNodeId)
++		: $terminalSessions;
 +
 +	const rel = (t: number) => {
 +		if (!t) return '';
@@ -1444,19 +1710,21 @@ index 0000000..074da74
 +								<span class="ml-auto shrink-0 text-[11px] text-gray-400">{rel(c.updated_at)}</span>
 +							</span>
 +							{#if sub(c)}<span class="block break-words text-xs text-gray-500 dark:text-gray-400 mt-0.5">{sub(c)}</span>{/if}
++							{#if !$selectedNodeId && $nodes.length > 1 && chatMachine(c)?.label}<span class="mt-1 inline-block"><MachineChip label={chatMachine(c).label} online={chatMachine(c)?.online ?? true} /></span>{/if}
 +						</span>
 +					</button>
 +				{/each}
 +			{/if}
 +
-+			{#if $terminalSessions.length}
++			{#if mterminals.length}
 +				<div class="px-2 pt-3 pb-1 text-xs font-medium text-gray-400 uppercase tracking-wide">{$i18n.t('Terminals')}</div>
-+				{#each $terminalSessions as t (t.id)}
++				{#each mterminals as t (t.id)}
 +					<button class="w-full text-left flex items-center gap-2.5 rounded-xl px-2.5 py-2 hover:bg-gray-50 dark:hover:bg-gray-900 transition"
 +						on:click={() => { activeTerminalId.set(t.id); goto('/terminal'); }}>
 +						<span class="size-2 shrink-0 rounded-full bg-green-500"></span>
-+						<span class="truncate text-sm">{t.name}</span>
-+						<span class="ml-auto shrink-0 text-[11px] text-gray-400">shell</span>
++						<span class="truncate text-sm flex-1 min-w-0">{t.name}</span>
++						{#if !$selectedNodeId && $nodes.length > 1 && termMachine(t)?.label}<MachineChip label={termMachine(t).label} online={termMachine(t)?.online ?? true} />{/if}
++						<span class="shrink-0 text-[11px] text-gray-400">shell</span>
 +					</button>
 +				{/each}
 +			{/if}

@@ -42,12 +42,34 @@ if [ -n "$TTOK" ]; then
   done
 fi
 
-# 3) fork image (hub only) — build from source if missing
+# 3) fork image (hub only) — build if missing, OR if the patches are newer than the built image.
+# The staleness check matters: this used to be a missing-image check only, so once a box had built the
+# fork ONCE it silently pinned that build forever. `git pull` + `./setup.sh` looked like it updated
+# OWUI and didn't — every later patch to owui-fork/patches/ was invisible on that machine.
+# Override with FORCE_FORK_REBUILD=1 (always) or SKIP_FORK_REBUILD=1 (never).
 if [ "$ROLE" = "hub" ]; then
   IMG="${OWUI_IMAGE:-agent-hub/open-webui:v0.11.0-fork}"
-  if ! docker image inspect "$IMG" >/dev/null 2>&1; then
-    echo "-- building OWUI fork image (first run)"
+  build_fork() {
     [ -d owui-fork/upstream/.git ] && ./owui-fork/build.sh || ./owui-fork/build.sh --clone
+  }
+  if [ -n "${SKIP_FORK_REBUILD:-}" ]; then
+    echo "-- SKIP_FORK_REBUILD set — leaving $IMG as-is"
+  elif ! docker image inspect "$IMG" >/dev/null 2>&1; then
+    echo "-- building OWUI fork image (first run)"; build_fork
+  elif [ -n "${FORCE_FORK_REBUILD:-}" ]; then
+    echo "-- FORCE_FORK_REBUILD set — rebuilding OWUI fork image"; build_fork
+  else
+    # epoch of the built image vs the newest file under owui-fork/ (patches, Dockerfile, build.sh)
+    IMG_EPOCH="$(docker image inspect "$IMG" --format '{{.Created}}' 2>/dev/null \
+      | { read -r t; date -j -f '%Y-%m-%dT%H:%M:%S' "${t%%.*}" '+%s' 2>/dev/null \
+          || date -d "$t" '+%s' 2>/dev/null; } || echo 0)"
+    SRC_EPOCH="$(find owui-fork -type f -not -path 'owui-fork/upstream/*' -exec stat -f '%m' {} + 2>/dev/null \
+      || find owui-fork -type f -not -path 'owui-fork/upstream/*' -printf '%T@\n' 2>/dev/null \
+      | cut -d. -f1)"
+    SRC_EPOCH="$(printf '%s\n' $SRC_EPOCH | sort -n | tail -1)"
+    if [ -n "$SRC_EPOCH" ] && [ "${IMG_EPOCH:-0}" -gt 0 ] && [ "$SRC_EPOCH" -gt "$IMG_EPOCH" ]; then
+      echo "-- owui-fork/ is newer than $IMG — rebuilding (set SKIP_FORK_REBUILD=1 to skip)"; build_fork
+    fi
   fi
 fi
 

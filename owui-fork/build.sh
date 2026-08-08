@@ -19,8 +19,12 @@ if [ "${1:-}" = "--clone" ] || [ ! -d "$UP/.git" ]; then
 fi
 
 echo "== reset upstream to clean $TAG =="
-git -C "$UP" checkout -- . 2>/dev/null || true
-git -C "$UP" clean -fd 2>/dev/null || true      # drop untracked; keep node_modules cache if present
+# `git checkout -- .` + `clean -fd` is NOT enough: neither touches the INDEX. Our patches stage new
+# files (git apply --3way), and a failed apply leaves unmerged (UU) entries, so both survive and the
+# next apply lands on an already-patched tree -> guaranteed conflict. The first build worked and every
+# rebuild after it failed. reset --hard clears index + tracked files; clean -fd drops the rest.
+git -C "$UP" reset --hard HEAD >/dev/null 2>&1 || true
+git -C "$UP" clean -fd >/dev/null 2>&1 || true  # drop untracked; keep node_modules cache if present
 
 echo "== apply patches/ (in order) =="
 shopt -s nullglob

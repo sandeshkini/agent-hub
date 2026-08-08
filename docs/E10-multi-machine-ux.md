@@ -31,14 +31,20 @@ organization. An extension of the current sidebar/inbox, not a redesign.
 ## Tasks
 | ID | Task | Where | Status |
 |----|------|-------|--------|
-| E10.1 | `model_id` in chat-list + inbox responses | backend `chats.py`, `agent_inbox.py` | ☐ |
-| E10.2 | `machineForModel` resolver + `MachineChip.svelte` | `src/lib/utils`, `src/lib/components` | ☐ |
-| E10.3 | Sidebar chat list: machine filter + chip | `Sidebar.svelte`, `ChatItem.svelte` | ☐ |
-| E10.4 | Inbox: machine filter + chips | `inbox/+page.svelte` | ☐ |
-| E10.5 | Terminals: stamp `serverId` + chip + filter | `agentTerminals.ts`, sidebar/inbox | ☐ |
-| E10.6 | Node front-door: single `register.mb` address | `node/`, compose, Pangolin | ☐ |
-| E10.7 | aibo wiring: pin heartbeat + OWUI connections + terminal server | aibo `.env`, new pin script | ☐ (blocked: DNS + Mac token) |
-| E10.8 | End-to-end verify with 2 machines | live | ☐ |
+| E10.1 | `model_id` in chat-list + inbox responses | backend `chats.py`, `agent_inbox.py` | ✅ (build28, live) |
+| E10.2 | `machineForModel` resolver + `MachineChip.svelte` | `src/lib/utils`, `src/lib/components` | ✅ |
+| E10.3 | Sidebar chat list: machine filter + chip | `Sidebar.svelte`, `ChatItem.svelte` | ✅ |
+| E10.4 | Inbox: machine filter + chips | `inbox/+page.svelte` | ✅ |
+| E10.5 | Terminals: stamp `serverId` + chip + filter | `agentTerminals.ts`, sidebar/inbox | ✅ |
+| E10.6 | Node front-door: single `register.mb` address | `node/frontdoor/`, compose, Pangolin res 24 | ✅ |
+| E10.7 | aibo wiring: pin heartbeat + OWUI connections + terminal server | aibo `.env`, pin script | ☐ (blocked: 1 DNS record + Mac token + Mac up) |
+| E10.8 | End-to-end verify with 2 machines | live | ☐ (blocked with E10.7) |
+
+## To finish (E10.7/E10.8) — needs from you
+1. **One** grey-cloud A record: `register.mb.kingdomofluna.com` → `46.62.218.143` (DNS only).
+2. The Mac's `TERMINAL_TOKEN` (from its `.env`).
+3. On the Mac: `git pull`, set `.env` (`COMPOSE_PROFILES=node`, `ADAPTER_KEY` matched, `FRONTDOOR_PORT=8088`), `./setup.sh` so the front-door + adapters run and newt targets `:8088`.
+Then aibo-side: pin heartbeat + OWUI connections (`register.mb/claude/v1`, `/opencode/v1`) + terminal server (`register.mb/term`), and verify chat streams + terminal open on the Mac + machine chips/filter.
 
 ## Not in scope
 - Hermes stays hub-only (single brain); nodes serve Claude + OpenCode.

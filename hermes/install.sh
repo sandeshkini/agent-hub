@@ -88,6 +88,20 @@ PY
 
 # 3) guardrail hook + cua-driver self-heal wrapper (update-proof: lives in the brain's dir)
 install -m 0755 "$DIR/hooks/deny-destructive.py" "$HERMES_HOME/hooks/deny-destructive.py"
+
+# 3a) the REAL cua-driver must exist first — our wrapper only ever execs it (CUA_DRIVER_REAL,
+# default ~/.local/bin/cua-driver). Deadly ordering trap: `hermes computer-use install` decides it
+# is done if ANY file sits at $HERMES_HOME/bin/cua-driver — which is exactly where we drop the
+# wrapper. Re-running this script therefore convinced the base installer the driver was present,
+# the real binary was never fetched, and computer_use failed with "cua-driver session setup failed"
+# / execv ENOENT. So: move any existing wrapper aside, install the real driver, then lay ours on top.
+REAL_CUA="${CUA_DRIVER_REAL:-$HOME/.local/bin/cua-driver}"
+if [ ! -e "$REAL_CUA" ]; then
+  [ -e "$HERMES_HOME/bin/cua-driver" ] && mv "$HERMES_HOME/bin/cua-driver" "$HERMES_HOME/bin/.cua-driver.wrapper.tmp"
+  echo "-- installing the real cua-driver (base hermes)"
+  "$VENV_HERMES" computer-use install || echo "⚠️  cua-driver install failed — computer_use will be unavailable"
+  rm -f "$HERMES_HOME/bin/.cua-driver.wrapper.tmp"
+fi
 install -m 0755 "$DIR/bin/cua-driver"           "$HERMES_HOME/bin/cua-driver"
 
 # 4) per-brain secrets .env (Hermes reads OPENROUTER_API_KEY etc. from here)
@@ -146,8 +160,11 @@ EOF
   launchctl unload "$PLIST" >/dev/null 2>&1 || true
   launchctl load "$PLIST"
   echo "-- launchd agent 'com.agenthub.$SVC' loaded"
-  echo "-- cua-driver macOS permissions (grant Accessibility + Screen Recording if prompted):"
-  ( export LD_LIBRARY_PATH="$HOME/.local/bin"; "$HOME/.local/bin/cua-driver" permissions status 2>/dev/null || true )
+  echo "-- cua-driver macOS permissions — computer_use stays dead until BOTH are granted to"
+  echo "   /Applications/CuaDriver.app in System Settings > Privacy & Security:"
+  echo "     • Accessibility      • Screen Recording"
+  echo "   (open -n -g -a CuaDriver --args serve  triggers the prompts)"
+  ( export LD_LIBRARY_PATH="$HOME/.local/bin"; "$REAL_CUA" check_permissions 2>/dev/null || true )
 else
   echo "-- no systemd/launchd; run manually:"
   echo "   HERMES_HOME=$HERMES_HOME HERMES_CUA_DRIVER_CMD=$HERMES_HOME/bin/cua-driver \\"

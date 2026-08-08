@@ -6,6 +6,7 @@
 // bash). Standalone — no dependency on the chat-agent / cm / dispatch.
 import http from "node:http";
 import { homedir } from "node:os";
+import { timingSafeEqual } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync, readdirSync } from "node:fs";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 
@@ -330,7 +331,13 @@ async function recoverFF() {
   }
 }
 
-function authed(req) { return !ADAPTER_KEY || req.headers["authorization"] === `Bearer ${ADAPTER_KEY}`; }
+// SECURITY (fail-CLOSED): empty ADAPTER_KEY denies ALL requests (never allow-all). Constant-time compare.
+function authed(req) {
+  if (!ADAPTER_KEY) return false;
+  const got = Buffer.from(String(req.headers["authorization"] || ""));
+  const want = Buffer.from(`Bearer ${ADAPTER_KEY}`);
+  return got.length === want.length && timingSafeEqual(got, want);
+}
 function sendJson(res, code, obj) { const b = JSON.stringify(obj); res.writeHead(code, { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(b) }); res.end(b); }
 
 const server = http.createServer((req, res) => {
@@ -416,5 +423,7 @@ const server = http.createServer((req, res) => {
     try { res.end(); } catch {}
   });
 });
-server.listen(PORT, "0.0.0.0", () => console.log(`[owui-claude] Agent-SDK adapter on 0.0.0.0:${PORT} (auth=${ADAPTER_KEY ? "on" : "off"}, workspace=${WORKSPACE}, ff4=${FF_ON ? "on" : "off"})`));
+// SECURITY: refuse to start unauthenticated — this adapter runs a host-shell-capable agent.
+if (!ADAPTER_KEY) { console.error("[owui-claude] FATAL: ADAPTER_KEY is empty — refusing to start (would be unauthenticated RCE)."); process.exit(1); }
+server.listen(PORT, "0.0.0.0", () => console.log(`[owui-claude] Agent-SDK adapter on 0.0.0.0:${PORT} (auth=on, workspace=${WORKSPACE}, ff4=${FF_ON ? "on" : "off"})`));
 recoverFF().catch(() => {});   // FF4: re-issue any runs interrupted by the last restart

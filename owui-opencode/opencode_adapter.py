@@ -12,6 +12,7 @@ opencode API used:
   POST /session/{id}/abort           -> cancel (OWUI Stop)
 Model id in OWUI is "opencode/<modelID>"; we map to {providerID, modelID}.
 """
+import hmac
 import json
 import os
 import queue
@@ -367,7 +368,10 @@ def _stream_turn_locked(sid, model_id, text, _sys):
 
 # ── HTTP (OpenAI-compatible) ──────────────────────────────────────────
 def _authed(handler):
-    return not ADAPTER_KEY or handler.headers.get("Authorization") == f"Bearer {ADAPTER_KEY}"
+    # SECURITY (fail-CLOSED): empty ADAPTER_KEY denies ALL requests (never allow-all). Constant-time compare.
+    if not ADAPTER_KEY:
+        return False
+    return hmac.compare_digest(handler.headers.get("Authorization", ""), f"Bearer {ADAPTER_KEY}")
 
 
 def _openai_usage(u):
@@ -525,8 +529,10 @@ def _ff_run(rec):  # FF4: re-issue an interrupted run; yield its text chunks
 
 
 def main():
-    print(f"[owui-opencode] adapter on 0.0.0.0:{PORT} -> {OC} "
-          f"(auth={'on' if ADAPTER_KEY else 'off'}, models={MODELS})", flush=True)
+    # SECURITY: refuse to start unauthenticated — this adapter drives a host-shell-capable agent.
+    if not ADAPTER_KEY:
+        raise SystemExit("[owui-opencode] FATAL: ADAPTER_KEY is empty — refusing to start (would be unauthenticated RCE).")
+    print(f"[owui-opencode] adapter on 0.0.0.0:{PORT} -> {OC} (auth=on, models={MODELS})", flush=True)
     threading.Thread(target=lambda: ff_recover("opencode", _ff_run), daemon=True).start()
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
 

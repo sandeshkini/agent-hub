@@ -34,7 +34,7 @@ from owui_mirror import Mirror, ff_write, ff_clear, ff_recover, tool_card
 
 BASE = os.getenv("HERMES_BASE", "http://127.0.0.1:9119")
 USER = os.getenv("HERMES_DASH_USER", "sandesh")
-PW = os.getenv("HERMES_DASH_PW", "hermesluna")
+PW = os.getenv("HERMES_DASH_PW", "")   # SECURITY: no hardcoded default — set HERMES_DASH_PW in .env
 ADAPTER_KEY = os.getenv("ADAPTER_KEY", "")          # if set, require Bearer <key>
 PORT = int(os.getenv("PORT", "9211"))
 MODEL_ID = "hermes"

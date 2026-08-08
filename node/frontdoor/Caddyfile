@@ -10,6 +10,11 @@
 }
 
 :8088 {
+	# SECURITY: overwrite client-supplied forwarding headers so they can't be spoofed into backend logs.
+	# (Backends auth via Bearer, not X-Forwarded, so this is defense-in-depth.)
+	header_up X-Forwarded-For {remote_host}
+	header_up X-Forwarded-Proto https
+
 	# Claude adapter → /claude/v1/...  (OWUI connection base: https://register.mb.<domain>/claude/v1)
 	handle_path /claude/* {
 		reverse_proxy owui-claude:9212

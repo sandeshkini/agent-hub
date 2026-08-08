@@ -11,10 +11,23 @@ Built fresh (PTY techniques from claude-monitor, not coupled). Env: PORT(7681) T
 TERMINAL_SHELL(/bin/bash) TERMINAL_CWD REPLAY_BYTES(262144) IDLE_TTL(3600)
 """
 import asyncio, json, os, pty, fcntl, termios, struct, signal, secrets, time
-import shutil, io, zipfile, mimetypes
+import shutil, io, zipfile, mimetypes, hmac
 from aiohttp import web, WSMsgType
 
 HOME = os.path.expanduser("~")
+
+# SECURITY: confine the HTTP file API to a root (default HOME). The interactive shell stays unrestricted
+# (that's its purpose, and it's token-gated); the file API is the high-blast-radius surface (single-call
+# read/write/delete of arbitrary paths), so it is jailed. Set TERMINAL_FS_ROOT=/ to disable on trusted setups.
+FS_ROOT = os.path.realpath(os.environ.get("TERMINAL_FS_ROOT", HOME))
+
+
+def _safe(p):
+    """Resolve a user-supplied path and confine it under FS_ROOT. Raises PermissionError if it escapes."""
+    full = os.path.realpath(os.path.expanduser(p if p else FS_ROOT))
+    if full != FS_ROOT and not full.startswith(FS_ROOT + os.sep):
+        raise PermissionError("path outside the allowed root")
+    return full
 
 PORT = int(os.environ.get("PORT", "7681"))
 TOKEN = os.environ.get("TERMINAL_TOKEN", "")
@@ -106,10 +119,11 @@ class Session:
 
 
 def _bearer_ok(request):
+    # SECURITY (fail-CLOSED): empty TOKEN denies ALL requests. Constant-time compare.
     if not TOKEN:
-        return True
-    auth = request.headers.get("Authorization", "")
-    return auth.removeprefix("Bearer ").strip() == TOKEN
+        return False
+    got = request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
+    return hmac.compare_digest(got, TOKEN)
 
 
 async def create_session(request):
@@ -126,8 +140,17 @@ async def ws_terminal(request):
     ws = web.WebSocketResponse(max_msg_size=0, heartbeat=30)
     await ws.prepare(request)
     loop = asyncio.get_running_loop()
-    authed = (not TOKEN)
+    authed = False   # SECURITY: fail-closed — the shell is never attached until the token is verified
     sess = None
+
+    async def _auth_timeout():
+        await asyncio.sleep(10)
+        if not authed:
+            try:
+                await ws.close(code=4401)
+            except Exception:
+                pass
+    timeout_task = loop.create_task(_auth_timeout())
 
     async def attach():
         nonlocal sess
@@ -157,11 +180,13 @@ async def ws_terminal(request):
                     continue
                 t = d.get("type")
                 if t == "auth":
-                    if TOKEN and d.get("token") != TOKEN:
+                    # SECURITY (fail-CLOSED): require a token match; empty TOKEN never authenticates.
+                    if not (TOKEN and hmac.compare_digest(str(d.get("token") or ""), TOKEN)):
                         await ws.close(code=4401)
                         return ws
                     if not authed:
                         authed = True
+                        timeout_task.cancel()
                         await attach()
                 elif not authed:
                     continue
@@ -176,6 +201,7 @@ async def ws_terminal(request):
             elif msg.type in (WSMsgType.CLOSE, WSMsgType.ERROR):
                 break
     finally:
+        timeout_task.cancel()
         if sess:
             sess.clients.discard(ws)  # shell keeps running for reconnect
     return ws
@@ -239,7 +265,10 @@ async def fs_cwd(request):
 async def fs_list(request):
     if not _bearer_ok(request):
         return web.json_response({"error": "unauthorized"}, status=401)
-    d = os.path.expanduser(request.query.get("directory", "/") or "/")
+    try:
+        d = _safe(request.query.get("directory") or FS_ROOT)
+    except PermissionError as ex:
+        return web.json_response({"error": str(ex)}, status=403)
     entries = []
     try:
         with os.scandir(d) as it:
@@ -259,8 +288,8 @@ async def fs_list(request):
 async def fs_read(request):
     if not _bearer_ok(request):
         return web.json_response({"error": "unauthorized"}, status=401)
-    p = os.path.expanduser(request.query.get("path", ""))
     try:
+        p = _safe(request.query.get("path", ""))
         if os.path.getsize(p) > 2_000_000:
             return web.json_response({"error": "file too large to preview"}, status=413)
         with open(p, "r", encoding="utf-8", errors="replace") as f:
@@ -272,7 +301,10 @@ async def fs_read(request):
 async def fs_view(request):
     if not _bearer_ok(request):
         return web.json_response({"error": "unauthorized"}, status=401)
-    p = os.path.expanduser(request.query.get("path", ""))
+    try:
+        p = _safe(request.query.get("path", ""))
+    except PermissionError as ex:
+        return web.json_response({"error": str(ex)}, status=403)
     if not os.path.isfile(p):
         return web.json_response({"error": "not found"}, status=404)
     ctype = mimetypes.guess_type(p)[0] or "application/octet-stream"
@@ -285,7 +317,7 @@ async def fs_mkdir(request):
         return web.json_response({"error": "unauthorized"}, status=401)
     try:
         b = await request.json()
-        os.makedirs(os.path.expanduser(b.get("path", "")), exist_ok=True)
+        os.makedirs(_safe(b.get("path", "")), exist_ok=True)
         return web.json_response({"ok": True})
     except Exception as ex:
         return web.json_response({"error": str(ex)}, status=400)
@@ -296,7 +328,7 @@ async def fs_delete(request):
         return web.json_response({"error": "unauthorized"}, status=401)
     try:
         b = await request.json()
-        p = os.path.expanduser(b.get("path", ""))
+        p = _safe(b.get("path", ""))
         if os.path.isdir(p) and not os.path.islink(p):
             shutil.rmtree(p)
         else:
@@ -311,8 +343,8 @@ async def fs_move(request):
         return web.json_response({"error": "unauthorized"}, status=401)
     try:
         b = await request.json()
-        src = os.path.expanduser(b.get("source") or b.get("from") or "")
-        dst = os.path.expanduser(b.get("destination") or b.get("to") or "")
+        src = _safe(b.get("source") or b.get("from") or "")
+        dst = _safe(b.get("destination") or b.get("to") or "")
         shutil.move(src, dst)
         return web.json_response({"ok": True})
     except Exception as ex:
@@ -322,11 +354,11 @@ async def fs_move(request):
 async def fs_upload(request):
     if not _bearer_ok(request):
         return web.json_response({"error": "unauthorized"}, status=401)
-    directory = os.path.expanduser(request.query.get("directory", HOME))
     try:
+        directory = _safe(request.query.get("directory", FS_ROOT))
         reader = await request.multipart()
         field = await reader.next()
-        dest = os.path.join(directory, os.path.basename(field.filename or "upload.bin"))
+        dest = _safe(os.path.join(directory, os.path.basename(field.filename or "upload.bin")))
         size = 0
         with open(dest, "wb") as f:
             while True:
@@ -344,7 +376,7 @@ async def fs_archive(request):
         return web.json_response({"error": "unauthorized"}, status=401)
     try:
         b = await request.json()
-        paths = [os.path.expanduser(p) for p in (b.get("paths") or [])]
+        paths = [_safe(p) for p in (b.get("paths") or [])]
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
             for p in paths:
@@ -384,6 +416,10 @@ def make_app():
 
 
 if __name__ == "__main__":
+    # SECURITY: refuse to start unauthenticated — this serves a real shell + a filesystem API.
+    if not TOKEN:
+        raise SystemExit("[owui-terminal] FATAL: TERMINAL_TOKEN is empty — refusing to start "
+                         "(would be an unauthenticated public shell + file API).")
     print(f"[owui-terminal] open-terminal spec on 0.0.0.0:{PORT} shell={SHELL} cwd={CWD} "
-          f"auth={'on' if TOKEN else 'OFF(dev)'}", flush=True)
+          f"auth=on fs_root={FS_ROOT}", flush=True)
     web.run_app(make_app(), host="0.0.0.0", port=PORT, print=None)

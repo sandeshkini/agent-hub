@@ -15,11 +15,21 @@ if [ ! -f .env ]; then
 fi
 # Read keys individually — do NOT bash-source .env (values may contain spaces/parens, e.g.
 # TERMINAL_NAME="aibo (host shell)", which break `source`). Docker compose reads .env with its own parser.
-getenv() { grep -E "^$1=" .env | head -1 | cut -d= -f2- || true; }
+# Strip an inline ` # comment` and trailing whitespace. .env ships comments on the same line as
+# several keys, and docker compose does NOT strip them either — that is how TERMINAL_TOKEN once became
+# the literal comment text, and how HERMES_INSTANCES spawned brains named `#`, `comma-list`, `e.g.`.
+# Only a `#` preceded by whitespace starts a comment, so values legitimately containing `#` survive.
+getenv() { grep -E "^$1=" .env | head -1 | cut -d= -f2- | sed -E 's/[[:space:]]+#.*$//; s/[[:space:]]+$//' || true; }
 ROLE="$(getenv COMPOSE_PROFILES)"; ROLE="${ROLE:-hub}"
+# COMPOSE_PROFILES is a comma-separated LIST (e.g. `hub,node,slack`) — a box can be both. Test for
+# membership, never equality, or a dual-role machine silently gets the node-only path.
+IS_HUB=""; IS_NODE=""
+case ",$ROLE," in *,hub,*) IS_HUB=1;; esac
+case ",$ROLE," in *,node,*) IS_NODE=1;; esac
 ADAPTER_BIND="$(getenv ADAPTER_BIND)"
 NODE_LABEL="$(getenv NODE_LABEL)"
 HUB_REGISTER_URL="$(getenv HUB_REGISTER_URL)"
+OWUI_PORT="$(getenv OWUI_PORT)"; OWUI_PORT="${OWUI_PORT:-3000}"
 echo "== Agent Hub setup — role: $ROLE =="
 
 # 2) host owui-terminal (real shell) + auto-fill TERMINAL_TOKEN in .env if blank
@@ -47,7 +57,7 @@ fi
 # fork ONCE it silently pinned that build forever. `git pull` + `./setup.sh` looked like it updated
 # OWUI and didn't — every later patch to owui-fork/patches/ was invisible on that machine.
 # Override with FORCE_FORK_REBUILD=1 (always) or SKIP_FORK_REBUILD=1 (never).
-if [ "$ROLE" = "hub" ]; then
+if [ -n "$IS_HUB" ]; then
   IMG="${OWUI_IMAGE:-agent-hub/open-webui:v0.11.0-fork}"
   build_fork() {
     [ -d owui-fork/upstream/.git ] && ./owui-fork/build.sh || ./owui-fork/build.sh --clone
@@ -83,14 +93,16 @@ for k in WEBUI_SECRET_KEY ADAPTER_KEY; do
   v="$(grep "^$k=" .env | cut -d= -f2-)"
   case "$v" in ""|change-me*) echo "⚠️  $k is empty/placeholder in .env — set it before real use";; esac
 done
-if [ "$ROLE" = "node" ] && [ "${ADAPTER_BIND:-127.0.0.1}" = "127.0.0.1" ]; then
-  echo "⚠️  node role but ADAPTER_BIND=127.0.0.1 — the hub can't reach this node's adapters. Set ADAPTER_BIND=0.0.0.0."
+# Only warn when there is no front-door: node-frontdoor proxies to the adapters over the compose
+# network, so ADAPTER_BIND=127.0.0.1 is correct (and preferred) on a front-door node.
+if [ -n "$IS_NODE" ] && [ "${ADAPTER_BIND:-127.0.0.1}" = "127.0.0.1" ] && [ ! -f node/frontdoor/Caddyfile ]; then
+  echo "⚠️  node role, no front-door, and ADAPTER_BIND=127.0.0.1 — the hub can't reach this node's adapters. Set ADAPTER_BIND=0.0.0.0."
 fi
 echo "-- docker compose up -d --build"
 docker compose up -d --build
 
 # 5) ollama model (hub)
-if [ "$ROLE" = "hub" ]; then
+if [ -n "$IS_HUB" ]; then
   echo "-- ensuring ollama model llama3.2:3b"
   docker exec ollama ollama list 2>/dev/null | grep -q 'llama3.2:3b' || docker exec ollama ollama pull llama3.2:3b || true
 fi
@@ -110,16 +122,16 @@ fi
 
 # 5.9) refresh OWUI's model list (adapters may have been recreated → avoid the stale "Model '' not
 #      found" gate; RESET_CONFIG_ON_START re-seeds connections on boot).
-if [ "$ROLE" = "hub" ]; then docker compose restart open-webui >/dev/null 2>&1 || true; fi
+if [ -n "$IS_HUB" ]; then docker compose restart open-webui >/dev/null 2>&1 || true; fi
 
 # 6) health
 echo "-- waiting for health"
-if [ "$ROLE" = "hub" ]; then
+if [ -n "$IS_HUB" ]; then
   for i in $(seq 1 40); do
     [ "$(docker inspect open-webui --format '{{.State.Health.Status}}' 2>/dev/null)" = "healthy" ] && break; sleep 2
   done
   echo ""
-  echo "✅ hub up. OWUI: http://localhost:${OWUI_PORT:-3000}   ·   registrar heartbeating '${NODE_LABEL}'."
+  echo "✅ hub up. OWUI: http://localhost:${OWUI_PORT}   ·   registrar heartbeating '${NODE_LABEL}'."
 else
   sleep 4
   echo ""

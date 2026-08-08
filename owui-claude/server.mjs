@@ -89,8 +89,15 @@ function htmlAttr(s) {
 // args+result). Verified via screenshot that OWUI renders <details type="tool_calls"> from stored content.
 function toolCard(name, argsJson, resultText, isError) {
   let res = resultText || "";
+  // FIX(bug2): neutralize backticks (-> U+02BB) BEFORE truncation so a ``` near the 4000-char
+  // cut can't break the HTML attribute/fence (same approach as owui-hermes _fence()).
+  res = res.replace(/`/g, "ʻ");
   if (res.length > 4000) res = res.slice(0, 4000) + "\n…(truncated)";
   return `\n<details type="tool_calls" done="true" name="${htmlAttr(name)}" arguments="${htmlAttr(argsJson || "{}")}" result="${htmlAttr(JSON.stringify(res))}"${isError ? ' error="true"' : ""}>\n<summary>Tool Executed</summary>\n</details>\n`;
+}
+// FIX(bug1): render accumulated thinking text as a collapsible OWUI reasoning block.
+function reasoningCard(text) {
+  return `\n<details type="reasoning" done="true">\n<summary>Thinking</summary>\n${text}\n</details>\n`;
 }
 
 // ── the turn: yields {content}/{usage} ──
@@ -115,6 +122,7 @@ async function* streamTurn(chatId, model, messages) {
   catch (e) { yield { content: `\n_Claude adapter error: ${e && e.message || e}_` }; return; }
 
   let streamedText = "", tool = {}, toolJson = {}, toolQueue = [], pendingTools = {}, completed = false;
+  let thinking = {};   // FIX(bug1): per-block accumulator for thinking_delta text
   try {
     for await (const m of q) {
       if (m.type === "system" && m.subtype === "init") { if (m.session_id) cachePut(conv, m.session_id); }
@@ -123,12 +131,24 @@ async function* streamTurn(chatId, model, messages) {
         if (ev?.type === "content_block_start" && ev.content_block?.type === "tool_use") {
           tool[ev.index] = { name: ev.content_block.name, id: ev.content_block.id }; toolJson[ev.index] = "";
           toolQueue.push(ev.content_block.name);   // fallback label if we can't correlate by id
+        } else if (ev?.type === "content_block_start" && ev.content_block?.type === "thinking") {
+          thinking[ev.index] = "";   // FIX(bug1): start accumulating a thinking block
         } else if (ev?.type === "content_block_delta" && ev.delta) {
           if (ev.delta.type === "text_delta" && ev.delta.text) { streamedText += ev.delta.text; yield { content: ev.delta.text }; }
+          else if (ev.delta.type === "thinking_delta" && ev.delta.thinking != null && thinking[ev.index] != null) thinking[ev.index] += ev.delta.thinking;   // FIX(bug1)
           else if (ev.delta.type === "input_json_delta" && tool[ev.index]) toolJson[ev.index] += (ev.delta.partial_json || "");
         } else if (ev?.type === "content_block_stop" && tool[ev.index]) {
-          pendingTools[tool[ev.index].id] = { name: tool[ev.index].name, input: toolJson[ev.index] || "" };   // keep name+args for the card
+          // FIX(bug3): guard the partial-JSON parse so malformed/partial input never throws or
+          // produces a broken card (mirror chat-agent's JSON.parse(... || "{}") guarded pattern).
+          let input;
+          try { input = JSON.stringify(JSON.parse(toolJson[ev.index] || "{}")); }
+          catch { input = "{}"; }
+          pendingTools[tool[ev.index].id] = { name: tool[ev.index].name, input };   // keep name+args for the card
           delete tool[ev.index]; delete toolJson[ev.index];
+        } else if (ev?.type === "content_block_stop" && thinking[ev.index] != null) {
+          const t = (thinking[ev.index] || "").trim();   // FIX(bug1): emit reasoning block on close
+          delete thinking[ev.index];
+          if (t) yield { content: reasoningCard(t) };
         }
       } else if (m.type === "assistant") {
         const norm = streamedText.replace(/\s+/g, "");
@@ -171,7 +191,7 @@ async function* streamTurn(chatId, model, messages) {
   } finally {
     // interrupt ONLY if the turn didn't finish (client aborted). On normal completion the
     // process is already gone and interrupt() rejects — catch that (it's a promise, not a throw).
-    if (!completed) { try { const p = q && q.interrupt && q.interrupt(); if (p && p.catch) p.catch(() => {}); } catch {} }
+    if (!completed) { try { const p = q && q.interrupt && q.interrupt(); if (p && p.catch) p.catch(() => {}); } catch (e) { console.error('[owui-claude] interrupt error:', e); } }   // FIX(bug4): don't swallow silently
   }
 }
 

@@ -41,6 +41,21 @@ CACHE_MAX = 512
 _sessions = OrderedDict()          # chat_key -> opencode session id (LRU)
 _sess_lock = threading.Lock()
 
+# FIX (2): per-conversation lock so two concurrent turns on the SAME chat serialise
+# (they share one opencode session id and would otherwise race on /session/{sid}/message).
+# Different conversations keep their own lock and stay concurrent. Mirrors owui-hermes.
+_conv_locks = {}                   # chat_key -> threading.Lock
+_conv_locks_guard = threading.Lock()
+
+
+def _conv_lock(k):
+    with _conv_locks_guard:
+        lk = _conv_locks.get(k)
+        if lk is None:
+            lk = threading.Lock()
+            _conv_locks[k] = lk
+        return lk
+
 
 # ── opencode REST helpers ─────────────────────────────────────────────
 def _open(method, path, body=None, timeout=30):
@@ -117,8 +132,22 @@ def _system_of(messages):
                        if isinstance(m, dict) and m.get("role") == "system" and _text_of(m).strip())
 
 
-def stream_turn(chat_id, model, messages):
-    """Yield {'content': str} / {'heartbeat': True} / {'usage': {...}} for one turn."""
+def _abort(sid):
+    """FIX (1): cancel an in-flight opencode turn (OWUI Stop / client disconnect)."""
+    if not sid:
+        return
+    try:
+        _open("POST", f"/session/{sid}/abort", {}, timeout=10).read()
+    except Exception as e:
+        print(f"[owui-opencode] abort failed sid={sid}: {e!r}", flush=True)
+
+
+def stream_turn(chat_id, model, messages, sink=None):
+    """Yield {'content': str} / {'heartbeat': True} / {'usage': {...}} for one turn.
+
+    FIX (1): `sink` (optional dict) receives the resolved opencode session id under
+    key 'sid' so the HTTP handler can POST /session/{sid}/abort on client disconnect.
+    """
     text = _last_user(messages)
     _sys = _system_of(messages)
     if not text:
@@ -126,10 +155,22 @@ def stream_turn(chat_id, model, messages):
         return
     model_id = _model_id(model)
     chat_key = _chat_key(chat_id, messages)
-    sid = _get_session(chat_key)
-    if not sid:
-        yield {"content": "_opencode: could not create a session._"}
-        return
+    # FIX (2): serialise turns for the SAME conversation (shared session id).
+    conv_lk = _conv_lock(chat_key)
+    conv_lk.acquire()
+    try:
+        sid = _get_session(chat_key)
+        if not sid:
+            yield {"content": "_opencode: could not create a session._"}
+            return
+        if isinstance(sink, dict):     # FIX (1): expose sid for abort
+            sink["sid"] = sid
+        yield from _stream_turn_locked(sid, model_id, text, _sys)
+    finally:
+        conv_lk.release()
+
+
+def _stream_turn_locked(sid, model_id, text, _sys):
 
     # 1) open the global event stream BEFORE posting (so we miss no deltas)
     try:
@@ -180,9 +221,21 @@ def stream_turn(chat_id, model, messages):
     seen_tools = {}            # partID -> True (header emitted)
     tool_done = set()          # partID (result emitted)
     got_text = False
+    # FIX (4): route reasoning/thinking deltas into a collapsible block instead of dropping.
+    part_types = {}            # partID -> announced part type ("reasoning"/"text"/…)
+    reasoning_open = False     # whether a <details type="reasoning"> block is mid-stream
+    # FIX (5): once session.idle lands, stop extending the turn and ignore late content.
+    done_turn = False
     idle_deadline = time.monotonic() + IDLE_TIMEOUT
     abs_deadline = time.monotonic() + ABS_TIMEOUT
     last_beat = time.monotonic()
+
+    def _close_reasoning():
+        nonlocal reasoning_open
+        if reasoning_open:
+            reasoning_open = False
+            return "\n</details>\n\n"
+        return ""
     try:
         while True:
             now = time.monotonic()
@@ -206,7 +259,8 @@ def stream_turn(chat_id, model, messages):
                     yield {"heartbeat": True}
                 continue
 
-            idle_deadline = time.monotonic() + IDLE_TIMEOUT
+            if not done_turn:                       # FIX (5): don't let late events extend a done turn
+                idle_deadline = time.monotonic() + IDLE_TIMEOUT
             if o.get("__eof__"):
                 break
             # Per-event processing is wrapped: a single malformed event is logged and SKIPPED
@@ -217,16 +271,51 @@ def stream_turn(chat_id, model, messages):
                 if props.get("sessionID") != sid:
                     continue
 
-                if typ == "message.part.delta" and props.get("field") == "text":
+                # FIX (3): opencode surfaced an error for this session — show it, end the turn.
+                if typ == "session.error":
+                    if done_turn:
+                        continue
+                    err = props.get("error") or props.get("message") or props.get("data") or props
+                    if isinstance(err, (dict, list)):
+                        err = json.dumps(err)
+                    tail = _close_reasoning()
+                    if tail:
+                        yield {"content": tail}
+                    yield {"content": f"\n\n_⚠️ opencode error: {str(err)[:400]}_"}
+                    done_turn = True         # FIX (5): treat as terminal, like idle
+                    break
+
+                # FIX (5): after idle, ignore any late/stale content events for this turn.
+                if done_turn:
+                    continue
+
+                if typ == "message.part.delta":
+                    field = props.get("field")
+                    pid = props.get("partID") or props.get("id") or ""
+                    ptype = part_types.get(pid, "")
                     d = props.get("delta", "")
-                    if d:
+                    # FIX (4): reasoning/thinking deltas → collapsible block (was: dropped).
+                    is_reasoning = field in ("reasoning", "thinking") or ptype in ("reasoning", "thinking")
+                    if d and is_reasoning:
+                        if not reasoning_open:
+                            reasoning_open = True
+                            yield {"content": '\n<details type="reasoning">\n<summary>Thinking</summary>\n\n'}
+                        yield {"content": d}
+                    elif d and field == "text":
+                        tail = _close_reasoning()   # FIX (4): close reasoning before visible text
+                        if tail:
+                            yield {"content": tail}
                         got_text = True
                         yield {"content": d}
 
                 elif typ == "message.part.updated":
                     part = props.get("part", {}) or {}
-                    if part.get("type") == "tool":
-                        pid = part.get("id") or part.get("callID") or ""
+                    ptype = part.get("type")
+                    pid = part.get("id") or part.get("callID") or ""
+                    # FIX (4): an update announces the part type before its deltas — remember it.
+                    if pid and ptype:
+                        part_types[pid] = ptype
+                    if ptype == "tool":
                         name = part.get("tool") or part.get("name") or "tool"
                         state = part.get("state", {}) or {}
                         status = state.get("status") or part.get("status")
@@ -239,15 +328,27 @@ def stream_turn(chat_id, model, messages):
                                 out = json.dumps(out)
                             out = (out or "").strip()
                             args = state.get("input") or state.get("args") or {}
+                            tail = _close_reasoning()   # FIX (4): close reasoning before a tool card
+                            if tail:
+                                yield {"content": tail}
                             # native OWUI tool card (collapsible "View Result from <name>")
                             yield {"content": tool_card(name, args, out, status == "error")}
 
                 elif typ == "session.idle":
+                    done_turn = True            # FIX (5): mark terminal; stop extending the turn
+                    tail = _close_reasoning()   # FIX (4): flush any open reasoning block
+                    if tail:
+                        yield {"content": tail}
                     break
             except Exception as ee:
                 traceback.print_exc()
                 print(f"[owui-opencode] skipped bad event: {ee!r}", flush=True)
                 continue
+
+        # FIX (4): if the loop broke (timeout/eof/cap) with a reasoning block still open, close it.
+        tail = _close_reasoning()
+        if tail:
+            yield {"content": tail}
 
         # usage from the final message, if available
         msg = post_result.get("msg") or {}
@@ -346,7 +447,9 @@ class Handler(BaseHTTPRequestHandler):
         # native fire-and-forget: mirror into the OWUI chat; client disconnect DETACHES the run.
         mirror = Mirror(chat_id, self.headers.get("X-OpenWebUI-Message-Id"),
                         self.headers.get("X-OpenWebUI-User-Jwt"))
-        gen = stream_turn(chat_id, model, messages)
+        sink = {}                     # FIX (1): stream_turn deposits the opencode session id here
+        gen = stream_turn(chat_id, model, messages, sink)
+        aborted = [False]             # FIX (1): guard so we only abort once
         if mirror.on:  # FF4: record the in-flight run so a restart can re-issue it
             ff_write("opencode", {"cid": chat_id, "mid": mirror.mid, "jwt": mirror.jwt,
                                   "model": model, "messages": messages})
@@ -367,6 +470,11 @@ class Handler(BaseHTTPRequestHandler):
             w(lambda: send({"role": "assistant"}))
             for d in gen:
                 if gone[0] and not mirror.on:
+                    # FIX (1): client disconnected (OWUI Stop) and no FF mirror is detached to
+                    # keep the run alive → cancel the opencode turn so it doesn't keep running.
+                    if not aborted[0]:
+                        aborted[0] = True
+                        _abort(sink.get("sid"))
                     gen.close()
                     break
                 if d.get("content"):
@@ -381,6 +489,10 @@ class Handler(BaseHTTPRequestHandler):
             w(lambda: send({}, "stop"))
             w(lambda: (self.wfile.write(b"data: [DONE]\n\n"), self.wfile.flush()))
         except (BrokenPipeError, ConnectionResetError):
+            # FIX (1): connection dropped mid-write → abort the turn unless a FF mirror keeps it alive.
+            if not mirror.on and not aborted[0]:
+                aborted[0] = True
+                _abort(sink.get("sid"))
             gen.close()
         except Exception as e:
             traceback.print_exc()
@@ -398,6 +510,10 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 pass
         finally:
+            # FIX (1): safety net — if the client is gone with no FF mirror and we never aborted, do so now.
+            if gone[0] and not mirror.on and not aborted[0]:
+                aborted[0] = True
+                _abort(sink.get("sid"))
             if mirror.on:  # FF4: run finished (or errored) → drop the durable record
                 ff_clear("opencode", chat_id, mirror.mid)
 

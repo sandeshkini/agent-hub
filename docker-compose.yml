@@ -33,6 +33,12 @@ services:
       ENABLE_FORWARD_USER_INFO_HEADERS: "true"   # forwards X-OpenWebUI-Chat-Id -> session continuity
       ENABLE_OLLAMA_API: "true"
       OLLAMA_BASE_URL: "http://ollama:11434"
+      # Inbox summaries: FREE model via the OpenCode Zen gateway (plain completion, no agent, no local CPU).
+      # SUMMARY_PROVIDER=ollama to revert to the local model.
+      SUMMARY_PROVIDER: "${SUMMARY_PROVIDER:-openai}"
+      SUMMARY_ADAPTER_URL: "${SUMMARY_ADAPTER_URL:-https://opencode.ai/zen/v1}"
+      SUMMARY_MODEL: "${SUMMARY_MODEL:-deepseek-v4-flash-free}"
+      SUMMARY_API_KEY: "${OPENCODE_API_KEY}"
       ENABLE_CHANNELS: "true"
       ENABLE_FOLDERS: "true"
       ENABLE_SUBAGENTS: "true"

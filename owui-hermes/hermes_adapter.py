@@ -315,6 +315,8 @@ def stream_turn(chat_id, messages):
             last_tool = {}
             complete_text = ""
             usage = None
+            reasoning_buf = ""       # FIX: accumulate thinking/reasoning deltas
+            reasoning_open = False   # FIX: whether a reasoning block is mid-stream
             idle_deadline = time.monotonic() + IDLE_TIMEOUT
             abs_deadline = time.monotonic() + ABS_TIMEOUT
             last_beat = time.monotonic()
@@ -366,10 +368,40 @@ def stream_turn(chat_id, messages):
                         import sys as _sys
                         print(f"[tooldbg] {t} keys={list(pay.keys())} pay={json.dumps(pay)[:900]}", file=_sys.stderr, flush=True)
 
+                    # FIX: accumulate Hermes reasoning/thinking deltas (both event
+                    # names can occur); do NOT emit yet — buffer until real content
+                    # arrives, then flush as ONE collapsible OWUI reasoning block.
+                    if t in ("thinking.delta", "reasoning.delta"):
+                        rtext = pay.get("text") or pay.get("delta") or pay.get("reasoning") or ""
+                        if rtext:
+                            reasoning_buf += rtext
+                            reasoning_open = True
+                        continue
+
+                    # FIX: flush any buffered reasoning as a collapsible block before
+                    # emitting the next visible content/tool output. Reuse _fence() so
+                    # backticks/HTML inside the reasoning can't break OWUI rendering.
+                    if reasoning_open and t in ("message.delta", "tool.start",
+                                                "tool.complete", "message.complete"):
+                        if reasoning_buf.strip():
+                            yield {"content": '<details type="reasoning">\n'
+                                              "<summary>Thinking</summary>\n"
+                                              + _fence(reasoning_buf.strip())
+                                              + "\n</details>\n\n"}
+                        reasoning_buf = ""
+                        reasoning_open = False
+
                     if t == "message.delta":
                         if pay.get("text"):
                             got_delta = True
                             yield {"content": pay["text"]}
+                    # FIX: surface intermediate tool progress (downloading…/processing…)
+                    # as a short italic line so it isn't silently dropped.
+                    elif t == "tool.progress":
+                        ptxt = (pay.get("text") or pay.get("message")
+                                or pay.get("status") or pay.get("detail") or "")
+                        if ptxt:
+                            yield {"content": f"\n_{str(ptxt)[:300]}_\n"}
                     elif t == "tool.start":
                         # tool.start only carries a human `context` preview (often EMPTY, e.g.
                         # computer_use). The REAL structured args arrive on tool.complete.
@@ -418,6 +450,14 @@ def stream_turn(chat_id, messages):
                             yield {"usage": u}                    # #4 token usage
                         completed = True
                         break
+                    # FIX: defensive — surface guardrail denials so a blocked command
+                    # isn't a silent no-op. Match any event type mentioning guard/denied/
+                    # blocked and pull a human reason from common payload fields.
+                    elif isinstance(t, str) and any(
+                            k in t.lower() for k in ("guard", "denied", "blocked")):
+                        reason = (pay.get("reason") or pay.get("message")
+                                  or pay.get("detail") or "blocked by guardrail")
+                        yield {"content": f"\n> ⚠️ {str(reason)[:400]}\n"}
                 except Exception as fe:
                     traceback.print_exc()
                     print(f"[owui-hermes] skipped bad frame: {fe!r}", flush=True)

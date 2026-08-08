@@ -22,10 +22,10 @@ index 55613ac..8977f88 100644
  # SCIM 2.0 API for identity management
 diff --git a/backend/open_webui/routers/agent_inbox.py b/backend/open_webui/routers/agent_inbox.py
 new file mode 100644
-index 0000000..a6f3cca
+index 0000000..29024e9
 --- /dev/null
 +++ b/backend/open_webui/routers/agent_inbox.py
-@@ -0,0 +1,117 @@
+@@ -0,0 +1,160 @@
 +# LOCAL PATCH (agent-hub fork): E2 Inbox with real-time smart summaries.
 +# Returns the user's chat list (same snippet/active/unread data as OWUI's list) with a one-line
 +# LLM summary attached per chat. Summaries are cached and regenerated ONLY when a chat changes
@@ -45,12 +45,21 @@ index 0000000..a6f3cca
 +
 +router = APIRouter()
 +
++# Summary provider. Default: a FREE model via the OpenCode **Zen** gateway (plain OpenAI-compatible —
++# NOT the agentic opencode adapter, which would run tools). Free cloud inference, off the local CPU.
++# SUMMARY_PROVIDER=ollama falls back to the local model. "openai" = any OpenAI-compatible base URL.
++SUMMARY_PROVIDER = os.environ.get("SUMMARY_PROVIDER", "openai").strip().lower()
++SUMMARY_ADAPTER_URL = os.environ.get("SUMMARY_ADAPTER_URL", "https://opencode.ai/zen/v1").rstrip("/")
++SUMMARY_API_KEY = os.environ.get("SUMMARY_API_KEY", os.environ.get("OPENCODE_API_KEY", ""))
++SUMMARY_MODEL = os.environ.get(
++    "INBOX_SUMMARY_MODEL",
++    "deepseek-v4-flash-free" if SUMMARY_PROVIDER != "ollama" else "llama3.2:3b",
++)
 +OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://ollama:11434").rstrip("/")
-+SUMMARY_MODEL = os.environ.get("INBOX_SUMMARY_MODEL", "llama3.2:3b")
 +
 +_summaries: dict = {}          # chat_id -> {"updated_at": int, "summary": str}
 +_inflight: set = set()
-+_sema = asyncio.Semaphore(2)   # cap concurrent CPU summarizations
++_sema = asyncio.Semaphore(2)   # cap concurrent summarizations
 +
 +
 +def _messages_text(chat_obj) -> str:
@@ -69,29 +78,63 @@ index 0000000..a6f3cca
 +        return ""
 +
 +
++_SUMMARY_INSTRUCTION = (
++    "In 4 to 8 words, write a concise title describing what this conversation is about. "
++    "Output ONLY the title — no quotes, no trailing period, no preamble."
++)
++
++
++def _clean_title(out: str) -> str:
++    out = (out or "").strip().strip('"').strip("`").strip()
++    # take the last non-empty line (free models sometimes prepend a preamble)
++    lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
++    if lines:
++        out = lines[-1].strip().strip('"').strip()
++    return out[:90]
++
++
++async def _summary_via_openai(text: str):
++    body = {
++        "model": SUMMARY_MODEL,
++        "stream": False,
++        "messages": [
++            {"role": "system", "content": _SUMMARY_INSTRUCTION},
++            {"role": "user", "content": "Conversation:\n" + text[:4000]},
++        ],
++    }
++    headers = {"Content-Type": "application/json"}
++    if SUMMARY_API_KEY:
++        headers["Authorization"] = f"Bearer {SUMMARY_API_KEY}"
++    async with aiohttp.ClientSession() as s:
++        async with s.post(
++            f"{SUMMARY_ADAPTER_URL}/chat/completions",
++            json=body,
++            headers=headers,
++            timeout=aiohttp.ClientTimeout(total=90),  # free model can cold-start
++        ) as r:
++            d = await r.json()
++            out = (((d.get("choices") or [{}])[0].get("message") or {}).get("content")) or ""
++            return _clean_title(out) or None
++
++
++async def _summary_via_ollama(text: str):
++    prompt = _SUMMARY_INSTRUCTION + "\n\nConversation:\n" + text[:4000] + "\n\nTitle:"
++    async with aiohttp.ClientSession() as s:
++        async with s.post(
++            f"{OLLAMA_BASE_URL}/api/generate",
++            json={"model": SUMMARY_MODEL, "prompt": prompt, "stream": False,
++                  "options": {"num_predict": 24, "temperature": 0.2}},
++            timeout=aiohttp.ClientTimeout(total=45),
++        ) as r:
++            d = await r.json()
++            return _clean_title(d.get("response") or "") or None
++
++
 +async def _generate_summary(text: str):
-+    prompt = (
-+        "In 4 to 8 words, write a concise title describing what this conversation is about. "
-+        "Output ONLY the title — no quotes, no trailing period.\n\nConversation:\n"
-+        + text[:4000]
-+        + "\n\nTitle:"
-+    )
 +    try:
-+        async with aiohttp.ClientSession() as s:
-+            async with s.post(
-+                f"{OLLAMA_BASE_URL}/api/generate",
-+                json={
-+                    "model": SUMMARY_MODEL,
-+                    "prompt": prompt,
-+                    "stream": False,
-+                    "options": {"num_predict": 24, "temperature": 0.2},
-+                },
-+                timeout=aiohttp.ClientTimeout(total=45),
-+            ) as r:
-+                d = await r.json()
-+                out = (d.get("response") or "").strip().strip('"').strip()
-+                out = out.split("\n")[0].strip()[:90]
-+                return out or None
++        if SUMMARY_PROVIDER == "ollama":
++            return await _summary_via_ollama(text)
++        return await _summary_via_openai(text)  # openai-compatible (default: OpenCode Zen free model)
 +    except Exception:
 +        return None
 +

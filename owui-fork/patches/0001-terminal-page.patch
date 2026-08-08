@@ -27,7 +27,7 @@ index 55613ac..798b2cf 100644
  
  # SCIM 2.0 API for identity management
 diff --git a/backend/open_webui/models/chats.py b/backend/open_webui/models/chats.py
-index 26e9dd3..598345d 100644
+index 26e9dd3..608d854 100644
 --- a/backend/open_webui/models/chats.py
 +++ b/backend/open_webui/models/chats.py
 @@ -223,6 +223,29 @@ class ChatResponse(BaseModel):
@@ -112,6 +112,15 @@ index 26e9dd3..598345d 100644
                      }
                  )
                  for chat in all_chats
+@@ -1705,7 +1733,7 @@ class ChatTable:
+         self, user_id: str, db: AsyncSession | None = None
+     ) -> list[ChatTitleIdResponse]:
+         async with get_async_db_context(db) as session:
+-            stmt = select(Chat.id, Chat.title, Chat.updated_at, Chat.created_at, Chat.last_read_at).filter_by(
++            stmt = select(Chat.id, Chat.title, Chat.updated_at, Chat.created_at, Chat.last_read_at, Chat.chat['models']).filter_by(
+                 user_id=user_id, pinned=True, archived=False
+             )
+             stmt = stmt.where(Chat.meta['internal'].as_boolean().is_not(True))
 @@ -1719,6 +1747,8 @@ class ChatTable:
                          'updated_at': chat[2],
                          'created_at': chat[3],
@@ -121,6 +130,15 @@ index 26e9dd3..598345d 100644
                      }
                  )
                  for chat in all_chats
+@@ -1953,7 +1983,7 @@ class ChatTable:
+     ) -> list[ChatTitleIdResponse]:
+         async with get_async_db_context(db) as session:
+             stmt = (
+-                select(Chat.id, Chat.title, Chat.updated_at, Chat.created_at, Chat.last_read_at)
++                select(Chat.id, Chat.title, Chat.updated_at, Chat.created_at, Chat.last_read_at, Chat.chat['models'])
+                 .filter_by(folder_id=folder_id, user_id=user_id)
+                 .filter(or_(Chat.pinned == False, Chat.pinned == None))
+                 .filter_by(archived=False)
 @@ -1976,6 +2006,8 @@ class ChatTable:
                          'updated_at': chat[2],
                          'created_at': chat[3],
@@ -130,6 +148,15 @@ index 26e9dd3..598345d 100644
                      }
                  )
                  for chat in all_chats
+@@ -2093,7 +2125,7 @@ class ChatTable:
+         db: AsyncSession | None = None,
+     ) -> list[ChatTitleIdResponse]:
+         async with get_async_db_context(db) as session:
+-            stmt = select(Chat.id, Chat.title, Chat.updated_at, Chat.created_at, Chat.last_read_at).filter_by(
++            stmt = select(Chat.id, Chat.title, Chat.updated_at, Chat.created_at, Chat.last_read_at, Chat.chat['models']).filter_by(
+                 user_id=user_id
+             )
+             stmt = stmt.where(Chat.meta['internal'].as_boolean().is_not(True))
 @@ -2130,6 +2162,8 @@ class ChatTable:
                          'updated_at': chat[2],
                          'created_at': chat[3],
@@ -483,10 +510,10 @@ index 0000000..eed014f
 +    return {"deleted": existed}
 diff --git a/backend/open_webui/routers/agent_terminal_sync.py b/backend/open_webui/routers/agent_terminal_sync.py
 new file mode 100644
-index 0000000..d34651e
+index 0000000..3ad82bf
 --- /dev/null
 +++ b/backend/open_webui/routers/agent_terminal_sync.py
-@@ -0,0 +1,75 @@
+@@ -0,0 +1,79 @@
 +# LOCAL PATCH (agent-hub fork): cross-device terminal-session sync.
 +#
 +# The terminal-session LIST (which shells are open, their names, the active one, and which machine
@@ -546,10 +573,14 @@ index 0000000..d34651e
 +        body = await request.json()
 +    except Exception:
 +        body = {}
++    try:
++        rev = int(body.get("rev") or 0)
++    except (TypeError, ValueError):
++        rev = 0  # tolerate a malformed rev (400-ish input) instead of raising a 500
 +    incoming = {
 +        "sessions": body.get("sessions") if isinstance(body.get("sessions"), list) else [],
 +        "activeId": str(body.get("activeId") or ""),
-+        "rev": int(body.get("rev") or 0),
++        "rev": rev,
 +    }
 +    with _lock:
 +        alld = _read_all()
@@ -821,7 +852,7 @@ index 28654d6..7bec24d 100644
  	$: if (
  		selectedTag !== undefined ||
 diff --git a/src/lib/components/chat/XTerminal.svelte b/src/lib/components/chat/XTerminal.svelte
-index ce1eda9..d42ae3d 100644
+index ce1eda9..542fd5e 100644
 --- a/src/lib/components/chat/XTerminal.svelte
 +++ b/src/lib/components/chat/XTerminal.svelte
 @@ -1,5 +1,5 @@
@@ -873,8 +904,21 @@ index ce1eda9..d42ae3d 100644
  
  		// Fit after a frame so the container has dimensions
  		requestAnimationFrame(() => {
+@@ -258,6 +267,12 @@
+ 		// handler would write a spurious "[Connection closed]" message.
+ 	};
+ 
++	// LOCAL PATCH (mobile key bar): send a raw byte sequence to the shell (Esc, Ctrl-C, arrows…) + refocus.
++	export function sendKey(data: string) {
++		if (ws && ws.readyState === WebSocket.OPEN) ws.send(new TextEncoder().encode(data));
++		term?.focus();
++	}
++
+ 	// Reconnect when the selected terminal changes
+ 	$: if ($selectedTerminalId !== undefined && term) {
+ 		// Clear the terminal screen and reconnect to the new server
 diff --git a/src/lib/components/layout/Sidebar.svelte b/src/lib/components/layout/Sidebar.svelte
-index f8ac62b..3b4d546 100644
+index f8ac62b..009cfdc 100644
 --- a/src/lib/components/layout/Sidebar.svelte
 +++ b/src/lib/components/layout/Sidebar.svelte
 @@ -74,6 +74,7 @@
@@ -898,7 +942,7 @@ index f8ac62b..3b4d546 100644
  	import SearchIcon from './Sidebar/icons/Search.svelte';
  	import Sidebar from '../icons/Sidebar.svelte';
  	import WorkspaceIcon from './Sidebar/icons/Workspace.svelte';
-@@ -94,7 +101,21 @@
+@@ -94,7 +101,22 @@
  	import MoreHorizontalIcon from './Sidebar/icons/MoreHorizontal.svelte';
  
  	const BREAKPOINT = 768;
@@ -909,7 +953,8 @@ index f8ac62b..3b4d546 100644
 +	// Attribution is by the chat's primary model (node registry maps model id → machine).
 +	$: visibleChats = $selectedNodeId
 +		? ($chats ?? []).filter(
-+				(c) => machineIdForModel(c?.model_id, $nodes, $hubNode) === $selectedNodeId
++				// chats with no model_id (optimistic inserts / imports) show in every machine view, never hidden
++				(c) => !c?.model_id || machineIdForModel(c?.model_id, $nodes, $hubNode) === $selectedNodeId
 +			)
 +		: ($chats ?? []);
 +
@@ -921,7 +966,7 @@ index f8ac62b..3b4d546 100644
  
  	let scrollTop = 0;
  
-@@ -125,6 +146,7 @@
+@@ -125,6 +147,7 @@
  	let showPinnedModels = false;
  	let showPinnedNotes = false;
  	let showChannels = false;
@@ -929,7 +974,7 @@ index f8ac62b..3b4d546 100644
  	let showFolders = false;
  	let showSharedFolders = false;
  	let showChatsMenu = false;
-@@ -175,6 +197,9 @@
+@@ -175,6 +198,9 @@
  				);
  			case 'playground':
  				return $user?.role === 'admin';
@@ -939,7 +984,7 @@ index f8ac62b..3b4d546 100644
  			default:
  				return false;
  		}
-@@ -182,8 +207,10 @@
+@@ -182,8 +208,10 @@
  
  	const getMenuItemMeta = (id) => {
  		const items = {
@@ -950,7 +995,7 @@ index f8ac62b..3b4d546 100644
  			automations: { label: 'Automations', href: '/automations', iconType: 'automations' },
  			calendar: { label: 'Calendar', href: '/calendar', iconType: 'calendar' },
  			playground: { label: 'Playground', href: '/playground', iconType: 'playground' }
-@@ -193,6 +220,8 @@
+@@ -193,6 +221,8 @@
  
  	const menuItemPathPrefixes = {
  		notes: '/notes',
@@ -959,7 +1004,7 @@ index f8ac62b..3b4d546 100644
  		workspace: '/workspace',
  		calendar: '/calendar',
  		automations: '/automations',
-@@ -1014,6 +1043,7 @@
+@@ -1014,6 +1044,7 @@
  					</Tooltip>
  				</div>
  
@@ -967,7 +1012,7 @@ index f8ac62b..3b4d546 100644
  				{#each pinnedItems as itemId (itemId)}
  					{@const meta = getMenuItemMeta(itemId)}
  					{#if meta && isMenuItemVisible(itemId)}
-@@ -1049,6 +1079,10 @@
+@@ -1049,6 +1080,10 @@
  											<CalendarIcon className="size-4" strokeWidth="1.5" />
  										{:else if itemId === 'playground'}
  											<CodeIcon className="size-4" strokeWidth="1.5" />
@@ -978,7 +1023,7 @@ index f8ac62b..3b4d546 100644
  										{/if}
  									</div>
  								</a>
-@@ -1259,6 +1293,10 @@
+@@ -1259,6 +1294,10 @@
  												<CalendarIcon className="size-4" strokeWidth="1.5" />
  											{:else if itemId === 'playground'}
  												<CodeIcon className="size-4" strokeWidth="1.5" />
@@ -989,7 +1034,7 @@ index f8ac62b..3b4d546 100644
  											{/if}
  										</div>
  
-@@ -1272,6 +1310,9 @@
+@@ -1272,6 +1311,9 @@
  					</div>
  				</div>
  
@@ -999,7 +1044,7 @@ index f8ac62b..3b4d546 100644
  				{#if ($models ?? []).length > 0 && (($settings?.pinnedModels ?? []).length > 0 || $config?.default_pinned_models)}
  					<SidebarSection
  						id="sidebar-models"
-@@ -1337,6 +1378,30 @@
+@@ -1391,6 +1433,30 @@
  					</SidebarSection>
  				{/if}
  
@@ -1026,11 +1071,11 @@ index f8ac62b..3b4d546 100644
 +						</div>
 +					{/each}
 +				</SidebarSection>
-+				
- 				{#if $config?.features?.enable_folders && ($user?.role === 'admin' || ($user?.permissions?.features?.folders ?? true))}
- 					<SidebarSection
- 						id="sidebar-folders"
-@@ -1586,8 +1651,8 @@
++
+ 				<SidebarSection
+ 					id="sidebar-chats"
+ 					className="mt-0.5"
+@@ -1586,8 +1652,8 @@
  					<div class=" flex-1 flex flex-col overflow-y-auto scrollbar-hidden">
  						<div class="pt-1.5">
  							{#if $chats}
@@ -1041,7 +1086,7 @@ index f8ac62b..3b4d546 100644
  										<div
  											class="w-full pl-2.5 text-xs text-gray-500 dark:text-gray-500 font-normal {idx ===
  											0
-@@ -1624,6 +1689,8 @@
+@@ -1624,6 +1690,8 @@
  										updatedAt={chat.updated_at}
  										lastReadAt={chat.last_read_at}
  										active={chat.active ?? false}
@@ -1291,10 +1336,10 @@ index 0000000..b5b9113
 +}
 diff --git a/src/lib/utils/agentTerminals.ts b/src/lib/utils/agentTerminals.ts
 new file mode 100644
-index 0000000..87b8e48
+index 0000000..aa55061
 --- /dev/null
 +++ b/src/lib/utils/agentTerminals.ts
-@@ -0,0 +1,182 @@
+@@ -0,0 +1,185 @@
 +// LOCAL PATCH (agent-hub fork): shared terminal-session store — now CROSS-DEVICE SYNCED.
 +// Terminal sessions live in the left sidebar (like chats) and drive the /terminal page. The list is
 +// cached in localStorage for instant paint AND persisted server-side (fork `/api/v1/terminal-sessions`)
@@ -1391,6 +1436,7 @@ index 0000000..87b8e48
 +
 +export const pullTerminalSessions = async () => {
 +	if (!browser) return;
++	if (typeof document !== 'undefined' && document.hidden) return; // don't poll a backgrounded tab
 +	try {
 +		const r = await fetch(SYNC_URL, { headers: { Authorization: `Bearer ${token()}` } });
 +		if (r.ok) applyServer(await r.json());
@@ -1441,8 +1487,10 @@ index 0000000..87b8e48
 +
 +export const closeTerminalSession = async (id: string) => {
 +	if (browser) {
++		// LOCAL PATCH (E10 fix): kill the PTY on the shell's ACTUAL machine, not always aibo.
++		const srv = get(terminalSessions).find((x) => x.id === id)?.serverId || SERVER_ID;
 +		try {
-+			await fetch(`${WEBUI_API_BASE_URL}/terminals/${SERVER_ID}/api/terminals/${id}`, {
++			await fetch(`${WEBUI_API_BASE_URL}/terminals/${srv}/api/terminals/${id}`, {
 +				method: 'DELETE',
 +				headers: { Authorization: `Bearer ${token()}` }
 +			});
@@ -1602,7 +1650,7 @@ index 0000000..c027323
 +}
 diff --git a/src/routes/(app)/inbox/+page.svelte b/src/routes/(app)/inbox/+page.svelte
 new file mode 100644
-index 0000000..feb3524
+index 0000000..cfed3cc
 --- /dev/null
 +++ b/src/routes/(app)/inbox/+page.svelte
 @@ -0,0 +1,144 @@
@@ -1652,7 +1700,7 @@ index 0000000..feb3524
 +
 +	// LOCAL PATCH (E10): scope to the selected machine (null = All machines). Attribution by model.
 +	$: mchats = $selectedNodeId
-+		? chats.filter((c) => machineIdForModel(c?.model_id, $nodes, $hubNode) === $selectedNodeId)
++		? chats.filter((c) => !c?.model_id || machineIdForModel(c?.model_id, $nodes, $hubNode) === $selectedNodeId)
 +		: chats;
 +	$: needs = mchats.filter((c) => st(c) !== 'read');
 +	$: recent = mchats.filter((c) => st(c) === 'read');
@@ -1752,10 +1800,10 @@ index 0000000..feb3524
 +</div>
 diff --git a/src/routes/(app)/terminal/+page.svelte b/src/routes/(app)/terminal/+page.svelte
 new file mode 100644
-index 0000000..b7eb9d1
+index 0000000..6dde1ec
 --- /dev/null
 +++ b/src/routes/(app)/terminal/+page.svelte
-@@ -0,0 +1,148 @@
+@@ -0,0 +1,180 @@
 +<script lang="ts">
 +	// LOCAL PATCH (agent-hub fork): dedicated Terminal page. Sessions are managed in the LEFT SIDEBAR
 +	// (shared store $lib/utils/agentTerminals — inbox-ready); this page renders the active shell
@@ -1812,6 +1860,25 @@ index 0000000..b7eb9d1
 +		const short = (t || '').includes(': ') ? t.split(': ').slice(1).join(': ') : t;
 +		setSessionTitle($activeTerminalId, short);
 +	};
++
++	// LOCAL PATCH (mobile key bar): a soft-key row for keys mobile keyboards lack (Esc, Ctrl-C, arrows…).
++	let xterm: any;
++	const KEYS = [
++		{ label: 'Esc', seq: '\x1b' },
++		{ label: 'Tab', seq: '\t' },
++		{ label: '^C', seq: '\x03' },
++		{ label: '^D', seq: '\x04' },
++		{ label: '^Z', seq: '\x1a' },
++		{ label: '^L', seq: '\x0c' },
++		{ label: '←', seq: '\x1b[D' },
++		{ label: '↑', seq: '\x1b[A' },
++		{ label: '↓', seq: '\x1b[B' },
++		{ label: '→', seq: '\x1b[C' },
++		{ label: '|', seq: '|' },
++		{ label: '~', seq: '~' },
++		{ label: '/', seq: '/' }
++	];
++	const key = (seq: string) => xterm?.sendKey?.(seq);
 +
 +	onMount(async () => {
 +		try { fontSize = Number(localStorage.getItem(FS_KEY)) || 13; } catch (e) {}
@@ -1875,7 +1942,7 @@ index 0000000..b7eb9d1
 +				</div>
 +			{:else if $activeTerminalId}
 +				{#key $activeTerminalId + '-' + reconnectKey}
-+					<div class="h-full w-full p-1.5"><XTerminal chatId={$activeTerminalId} {fontSize} on:title={(e) => onTitle(e.detail)} /></div>
++					<div class="h-full w-full p-1.5"><XTerminal bind:this={xterm} chatId={$activeTerminalId} {fontSize} on:title={(e) => onTitle(e.detail)} /></div>
 +				{/key}
 +			{:else}
 +				<div class="h-full flex items-center justify-center">
@@ -1903,4 +1970,17 @@ index 0000000..b7eb9d1
 +			</div>
 +		{/if}
 +	</div>
++
++	<!-- LOCAL PATCH (mobile key bar): soft keys for what mobile keyboards lack. Mobile only, when connected. -->
++	{#if $mobile && loaded && hasServer && $activeTerminalId}
++		<div class="shrink-0 flex items-center gap-1 overflow-x-auto scrollbar-hidden px-1.5 py-1 border-t border-gray-100 dark:border-gray-850 bg-gray-50 dark:bg-gray-900">
++			{#each KEYS as k}
++				<button
++					class="shrink-0 min-w-[2.1rem] px-2 py-1.5 rounded-md text-xs font-medium text-gray-700 dark:text-gray-200 bg-white dark:bg-gray-850 border border-gray-200 dark:border-gray-800 active:bg-gray-200 dark:active:bg-gray-700"
++					on:mousedown|preventDefault={() => key(k.seq)}
++					on:touchstart|preventDefault={() => key(k.seq)}
++				>{k.label}</button>
++			{/each}
++		</div>
++	{/if}
 +</div>

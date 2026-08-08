@@ -13,7 +13,9 @@
 set -u
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_FILE="$DIR/.env"
-getenv() { grep -E "^$1=" "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2-; }
+# strip a trailing " # comment" and trailing whitespace (matches setup.sh's getenv), so a commented
+# PINNED_NODES_JSON line doesn't break json.loads and silently drop every node.
+getenv() { grep -E "^$1=" "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2- | sed -E 's/[[:space:]]+#.*$//; s/[[:space:]]+$//'; }
 HUB_URL="${OWUI_URL:-http://localhost:3000}/api/v1/nodes/register"
 INTERVAL="${PIN_INTERVAL:-45}"
 

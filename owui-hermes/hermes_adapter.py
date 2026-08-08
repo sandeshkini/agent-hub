@@ -20,6 +20,7 @@ v2 hardening (from a 3-subagent review of v1):
 - Optional adapter auth (ADAPTER_KEY) so only OWUI can drive it; creds via env.
 """
 import hashlib
+import hmac
 import json
 import os
 import threading
@@ -514,9 +515,10 @@ class H(BaseHTTPRequestHandler):
         pass
 
     def _authed(self):
+        # SECURITY (fail-CLOSED): empty ADAPTER_KEY denies ALL requests. Constant-time compare.
         if not ADAPTER_KEY:
-            return True
-        return self.headers.get("Authorization", "") == f"Bearer {ADAPTER_KEY}"
+            return False
+        return hmac.compare_digest(self.headers.get("Authorization", ""), f"Bearer {ADAPTER_KEY}")
 
     def _json(self, code, obj):
         b = json.dumps(obj).encode()
@@ -654,9 +656,11 @@ def _ff_run(rec):  # FF4: re-issue an interrupted run; yield its text chunks
 
 
 if __name__ == "__main__":
+    # SECURITY: refuse to start unauthenticated — this proxies a full agent (Hermes dashboard).
+    if not ADAPTER_KEY:
+        raise SystemExit("[owui-hermes] FATAL: ADAPTER_KEY is empty — refusing to start (would be an open proxy).")
     _login()
     srv = ThreadingHTTPServer(("0.0.0.0", PORT), H)
-    print(f"[owui-hermes v2] streaming /api/ws adapter on 0.0.0.0:{PORT} "
-          f"(auth={'on' if ADAPTER_KEY else 'off'})", flush=True)
+    print(f"[owui-hermes v2] streaming /api/ws adapter on 0.0.0.0:{PORT} (auth=on)", flush=True)
     threading.Thread(target=lambda: ff_recover("hermes", _ff_run), daemon=True).start()
     srv.serve_forever()

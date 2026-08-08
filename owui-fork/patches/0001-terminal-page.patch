@@ -815,7 +815,7 @@ index f8ac62b..3d8fd58 100644
  					<SidebarSection
  						id="sidebar-folders"
 diff --git a/src/lib/components/layout/Sidebar/ChatItem.svelte b/src/lib/components/layout/Sidebar/ChatItem.svelte
-index 3e9602b..9eadffc 100644
+index 3e9602b..73cd455 100644
 --- a/src/lib/components/layout/Sidebar/ChatItem.svelte
 +++ b/src/lib/components/layout/Sidebar/ChatItem.svelte
 @@ -18,6 +18,7 @@
@@ -847,8 +847,8 @@ index 3e9602b..9eadffc 100644
 +							{title}
 +						</div>
 +						{#if $chatSummaries[id]}
-+							<!-- LOCAL PATCH: allow the summary to wrap to two lines so more of it is readable -->
-+							<div class="text-xs text-gray-400 dark:text-gray-500 leading-snug line-clamp-2 break-words">{$chatSummaries[id]}</div>
++							<!-- LOCAL PATCH: show the full summary (status line, capped ~140 chars server-side) -->
++							<div class="text-xs text-gray-400 dark:text-gray-500 leading-snug break-words whitespace-normal">{$chatSummaries[id]}</div>
 +						{/if}
  					</div>
  				</div>
@@ -1179,7 +1179,7 @@ index 0000000..b4813a2
 +}
 diff --git a/src/routes/(app)/inbox/+page.svelte b/src/routes/(app)/inbox/+page.svelte
 new file mode 100644
-index 0000000..e7e5906
+index 0000000..074da74
 --- /dev/null
 +++ b/src/routes/(app)/inbox/+page.svelte
 @@ -0,0 +1,126 @@
@@ -1270,7 +1270,7 @@ index 0000000..e7e5906
 +								<span class="truncate text-sm font-medium">{c.title || $i18n.t('New Chat')}</span>
 +								<span class="ml-auto shrink-0 text-[11px] text-gray-400">{rel(c.updated_at)}</span>
 +							</span>
-+							{#if sub(c)}<span class="block truncate text-xs text-gray-500 dark:text-gray-400 mt-0.5">{sub(c)}</span>{/if}
++							{#if sub(c)}<span class="block break-words text-xs text-gray-500 dark:text-gray-400 mt-0.5">{sub(c)}</span>{/if}
 +						</span>
 +					</button>
 +				{/each}
@@ -1298,7 +1298,7 @@ index 0000000..e7e5906
 +							<span class="truncate text-sm">{c.title || $i18n.t('New Chat')}</span>
 +							<span class="ml-auto shrink-0 text-[11px] text-gray-400">{rel(c.updated_at)}</span>
 +						</span>
-+						{#if sub(c)}<span class="block truncate text-xs text-gray-500 dark:text-gray-400 mt-0.5">{sub(c)}</span>{/if}
++						{#if sub(c)}<span class="block break-words text-xs text-gray-500 dark:text-gray-400 mt-0.5">{sub(c)}</span>{/if}
 +					</span>
 +				</button>
 +			{/each}

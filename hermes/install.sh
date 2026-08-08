@@ -32,6 +32,8 @@ export HERMES_DASH_USER="${HERMES_DASH_USER:-$(getenv HERMES_DASH_USER)}"
 export HERMES_DASH_PW_HASH="${HERMES_DASH_PW_HASH:-$(getenv HERMES_DASH_PW_HASH)}"
 export OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-$(getenv OPENROUTER_API_KEY)}"
 export MCP_SERVERS="${MCP_SERVERS:-$(getenv MCP_SERVERS)}"
+# auxiliary tasks authenticate to our own owui-claude adapter with the shared bearer
+export ADAPTER_KEY="${ADAPTER_KEY:-$(getenv ADAPTER_KEY)}"
 HERMES_INSTALL_CMD="${HERMES_INSTALL_CMD:-$(getenv HERMES_INSTALL_CMD)}"
 
 HERMES_HOME="$HOME/.hermes"; SVC="hermes-dashboard"
@@ -62,7 +64,7 @@ import os, sys
 tpl, dst, home = sys.argv[1], sys.argv[2], sys.argv[3]
 import json
 s = open(tpl).read().replace('__HERMES_HOME__', home)
-for k in ('HERMES_DASH_USER', 'HERMES_DASH_PW_HASH'):
+for k in ('HERMES_DASH_USER', 'HERMES_DASH_PW_HASH', 'ADAPTER_KEY'):
     s = s.replace('${'+k+'}', os.environ.get(k, ''))
 # External MCP hub: merge http entries from MCP_SERVERS into mcp_servers (one place -> all agents).
 # Only round-trips YAML when there ARE extra servers (keeps the default byte-identical); guarded on PyYAML.

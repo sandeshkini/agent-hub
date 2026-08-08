@@ -2,10 +2,40 @@ model:
   default: z-ai/glm-5.2
   provider: openrouter
   base_url: https://openrouter.ai/api/v1
+# Auxiliary tasks (vision pre-analysis, web extraction, compression, titles) route to OUR OWN
+# owui-claude adapter — the Agent SDK running on the Claude Code subscription (CLAUDE_CODE_OAUTH_TOKEN).
+# Same trick as the openai-codex provider: reuse a subscription CLI's auth instead of paying per token.
+# It already speaks OpenAI /v1/chat/completions AND already converts `image_url` data URIs into
+# Anthropic image blocks, so it works as a drop-in custom endpoint for vision.
+#
+# Why this matters: agent.image_input_mode below is `text`, so EVERY image the agent sees goes through
+# auxiliary.vision. Pointed at OpenRouter that was a per-screenshot charge on a non-free SKU.
 auxiliary:
+  # free_only makes the OpenRouter fallback skip non-:free SKUs. That fallback is the LAST resort for
+  # any task not explicitly pointed at our adapter below (title generation, summarization, memory
+  # flush) — so openrouter_model must name a real :free model, or those tasks auto-detect their way to
+  # "no provider available" and silently stop working.
+  free_only: true
+  openrouter_model: google/gemma-4-31b-it:free   # free + vision-capable, 262k ctx
+  title_generation:
+    model: claude-sonnet-5
+    base_url: http://localhost:9212/v1
+    api_key: ${ADAPTER_KEY}
+    timeout: 120
   vision:
-    provider: openrouter                   # API vision (no GPU needed, fast, cheap)
-    model: google/gemini-2.5-flash-lite    # ~$0.10/Mtok in; strong on screenshots/docs/OCR
+    model: claude-sonnet-5
+    base_url: http://localhost:9212/v1     # owui-claude (ADAPTER_BIND, host-side; Hermes runs on the host)
+    api_key: ${ADAPTER_KEY}
+    timeout: 120
+  web_extract:
+    model: claude-sonnet-5
+    base_url: http://localhost:9212/v1
+    api_key: ${ADAPTER_KEY}
+    timeout: 120
+  compression:
+    model: claude-sonnet-5
+    base_url: http://localhost:9212/v1
+    api_key: ${ADAPTER_KEY}
     timeout: 120
 agent:
   max_turns: 60

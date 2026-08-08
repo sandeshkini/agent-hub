@@ -78,6 +78,10 @@ else
   echo "-- Hermes: base hermes-agent not installed → skipping brains (see hermes/README.md to add)"
 fi
 
+# 5.9) refresh OWUI's model list (adapters may have been recreated → avoid the stale "Model '' not
+#      found" gate; RESET_CONFIG_ON_START re-seeds connections on boot).
+if [ "$ROLE" = "hub" ]; then docker compose restart open-webui >/dev/null 2>&1 || true; fi
+
 # 6) health
 echo "-- waiting for health"
 if [ "$ROLE" = "hub" ]; then

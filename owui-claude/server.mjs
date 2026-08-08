@@ -12,6 +12,9 @@ import { query } from "@anthropic-ai/claude-agent-sdk";
 const PORT = Number(process.env.OWUI_CLAUDE_PORT || 9212);   // dedicated var — PORT may be polluted
 const ADAPTER_KEY = process.env.ADAPTER_KEY || "";
 const MCP_TOOLS_URL = process.env.MCP_TOOLS_URL || "http://mcp-tools:8000/mcp";   // shared MCP tools
+// External MCP hub: one place (MCP_SERVERS in .env, JSON list of {name,url,type?}) -> ALL adapters.
+// Add Linear/custom/etc. once; every agent gets it. See mcp/README.md.
+const EXTRA_MCP = (() => { try { return JSON.parse(process.env.MCP_SERVERS || "[]"); } catch { return []; } })();
 const WORKSPACE = process.env.WORKSPACE || homedir() + "/.owui-claude-workspace";
 const DEFAULT_MODEL = process.env.CLAUDE_MODEL || "claude-sonnet-4-5";
 const MODELS = (process.env.CLAUDE_MODELS || "claude-sonnet-4-5,claude-opus-4-1").split(",").map(s => s.trim()).filter(Boolean);
@@ -148,7 +151,12 @@ async function* streamTurn(chatId, model, messages, ctx = {}) {
   // shared MCP tools (publish_artifact + notify) — same server all agents use; calls render as native cards.
   // strictMcpConfig: load ONLY this MCP server (ignore any host/project .mcp.json so the agent doesn't
   // pick up unrelated servers like claude-monitor via the /home/beastblaster mount).
-  if (MCP_TOOLS_URL) { opts.mcpServers = { tools: { type: "http", url: MCP_TOOLS_URL } }; opts.strictMcpConfig = true; }
+  {
+    const mcpServers = {};
+    if (MCP_TOOLS_URL) mcpServers.tools = { type: "http", url: MCP_TOOLS_URL };
+    for (const s of EXTRA_MCP) if (s && s.name && s.url) mcpServers[s.name] = { type: s.type || "http", url: s.url };
+    if (Object.keys(mcpServers).length) { opts.mcpServers = mcpServers; opts.strictMcpConfig = true; }
+  }
   if (sys) opts.appendSystemPrompt = sys;                                   // also as a real system prompt (covers image turns)
   if (resume) opts.resume = resume;
 

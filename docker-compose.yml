@@ -109,6 +109,7 @@ services:
       OWUI_CLAUDE_PORT: "9212"
       CLAUDE_MODELS: "${CLAUDE_MODELS}"
       CLAUDE_MODEL: "${CLAUDE_MODEL}"
+      MCP_SERVERS: "${MCP_SERVERS:-[]}"           # external MCP hub: one place -> all adapters
       WORKSPACE: "${WORKSPACE:-/home/beastblaster}"
       HOME: "/home/node"
 
@@ -126,6 +127,7 @@ services:
       - ${WORKSPACE_HOST:-/home/beastblaster}:${WORKSPACE:-/home/beastblaster}
     environment:
       OPENCODE_API_KEY: "${OPENCODE_API_KEY}"
+      MCP_SERVERS: "${MCP_SERVERS:-[]}"           # external MCP hub: one place -> all adapters
       HOME: "/home/node"
 
   owui-opencode:

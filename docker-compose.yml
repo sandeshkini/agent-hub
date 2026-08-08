@@ -20,7 +20,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"      # reach the host owui-terminal PTY service (:7681)
     ports:
-      - "3000:8080"
+      - "${OWUI_PORT:-3000}:8080"
     volumes:
       - open-webui:/app/backend/data
     environment:
@@ -28,6 +28,10 @@ services:
       WEBUI_AUTH: "false"
       WEBUI_SECRET_KEY: "${WEBUI_SECRET_KEY}"     # PINNED → stable JWT sessions across restarts
       NODE_HUB_TOKEN: "${NODE_HUB_TOKEN:-}"       # gates /api/nodes/register (empty = open, LAN only)
+      # Settings→Account→API keys; the slack-gateway needs one for OWUI_API_KEY. NOTE: this only seeds
+      # a FRESH `open-webui` volume — the value is persisted in the DB (`auth.enable_api_keys`), so on
+      # an existing volume flip it in Admin Settings → General instead.
+      ENABLE_API_KEYS: "${ENABLE_API_KEYS:-true}"
       OPENAI_API_BASE_URLS: "http://owui-hermes:9211/v1;http://owui-claude:9212/v1;http://owui-opencode:9213/v1"
       OPENAI_API_KEYS: "${ADAPTER_KEY};${ADAPTER_KEY};${ADAPTER_KEY}"
       ADAPTER_KEY: "${ADAPTER_KEY}"                # E7: /api/agent/answer proxies to owui-claude with this

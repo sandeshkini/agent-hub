@@ -68,6 +68,29 @@ docker compose logs -f owui-claude
 docker compose -f docker-compose.yml -f docker-compose.stock.yml up -d open-webui   # rollback OWUI to :main
 ```
 
+## macOS (the defaults in this repo are aibo/Linux)
+Everything works on an Apple-Silicon Mac; these are the deltas that actually bite.
+
+- **Docker runtime** — there is none out of the box. `brew install --cask orbstack` (lighter + faster
+  than Docker Desktop, ships `docker` + `docker compose`), then `open -a OrbStack` once so the daemon
+  is running before `./setup.sh`.
+- **`.env`** — `WORKSPACE_HOST`/`WORKSPACE` = `/Users/you`, and **`DOCKER_USER=` blank** (the
+  `1000:1000` default is a Linux uid:gid and breaks file ownership in the adapters).
+- **Port 3000 is crowded** on a dev Mac. `OWUI_PORT` moves Open WebUI's *host* port (the container is
+  always 8080); if you change it, update `NODE_URL`/`NODE_API_URL` to match.
+- **`$` in `.env` values must be `$$`.** Docker compose interpolates `$` when it parses `.env`, so the
+  scrypt `HERMES_DASH_PW_HASH` (`scrypt$16384$8$1$…`) gets mangled and every `docker compose` call
+  warns `The "16384" variable is not set`. `hermes/install.sh` un-escapes on read.
+- **`ENABLE_API_KEYS` is stored in the OWUI database, not just env** — on a volume that already exists,
+  the compose env var won't flip it. Admin Settings → General → Enable API Key, or
+  `POST /api/v1/auths/admin/config` with `ENABLE_API_KEYS: true`. You need a key for `OWUI_API_KEY`
+  (the Slack gateway); OWUI still requires a bearer token on `/api/*` even with `WEBUI_AUTH=false`.
+- **Host services are launchd agents**, not systemd: `com.agenthub.owui-terminal` and
+  `com.agenthub.hermes-dashboard` (`launchctl list | grep agenthub`; plists in `~/Library/LaunchAgents`).
+- **Hermes' `computer_use` needs Accessibility + Screen Recording** granted to `cua-driver` in System
+  Settings → Privacy & Security. The brain runs fine without it; only GUI control is affected.
+- Adapters reach the host brain via `host.docker.internal` — works on OrbStack, no extra config.
+
 ## Notes
 - **owui-terminal runs on the host** (real shell for heroku/git/claude) — not a container; `install.sh`
   sets up systemd (Linux) / launchd (macOS).

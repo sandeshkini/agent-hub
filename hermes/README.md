@@ -12,7 +12,12 @@ Screen Recording on macOS — so it can't be containerized). This dir makes our 
 - `install.sh` — applies all of the above + installs the gateway service (systemd/launchd).
 
 ## Prereqs
-- **base hermes-agent** (private `NousResearch/hermes-agent` + its venv) installed. `install.sh` verifies
+- **base hermes-agent** — `NousResearch/hermes-agent` is **public**; install it with the official
+  one-liner (`curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash`), which sets up uv,
+  Python 3.11, node, ripgrep and ffmpeg and lands at `~/.hermes/hermes-agent` + `~/.local/bin/hermes`.
+  Heads-up: it writes its own `~/.hermes/config.yaml`, which **`./hermes/install.sh` then overwrites**
+  from `config.yaml.template` — that's the point, but back the original up if you want to diff it.
+  (Historical note: this used to be a private repo + manual venv.) `install.sh` verifies
   it and stops with instructions if missing (or runs `HERMES_INSTALL_CMD` if you set it).
 - Python 3, and on macOS grant `cua-driver` **Accessibility + Screen Recording** when prompted.
 - Secrets in the repo `.env`: `OPENROUTER_API_KEY`, `HERMES_DASH_USER`, `HERMES_DASH_PW_HASH`.

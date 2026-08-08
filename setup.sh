@@ -89,7 +89,7 @@ if [ "$ROLE" = "hub" ]; then
     [ "$(docker inspect open-webui --format '{{.State.Health.Status}}' 2>/dev/null)" = "healthy" ] && break; sleep 2
   done
   echo ""
-  echo "✅ hub up. OWUI: http://localhost:3000   ·   registrar heartbeating '${NODE_LABEL}'."
+  echo "✅ hub up. OWUI: http://localhost:${OWUI_PORT:-3000}   ·   registrar heartbeating '${NODE_LABEL}'."
 else
   sleep 4
   echo ""

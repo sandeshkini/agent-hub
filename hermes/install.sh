@@ -7,8 +7,8 @@
 #   ./install.sh [--name default] [--port 9119]
 #
 # NOTE: computer_use needs the HOST GUI (X11 on Linux / Accessibility+Screen-Recording on macOS), so
-# Hermes runs on the host — never in a container. Base hermes-agent (private NousResearch repo + venv)
-# must be installed first; this script verifies it and applies our reproducible layer on top.
+# Hermes runs on the host — never in a container. Base hermes-agent (public NousResearch repo, installed
+# via its own installer) must be present first; this script applies our reproducible layer on top.
 set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$DIR/.." && pwd)"
@@ -24,7 +24,10 @@ done
 
 # repo .env supplies HERMES_DASH_USER / HERMES_DASH_PW_HASH / OPENROUTER_API_KEY. Read keys individually
 # (do NOT bash-source .env — values can contain spaces/parens/special chars that break `source`).
-getenv() { [ -f "$ROOT/.env" ] && grep -E "^$1=" "$ROOT/.env" | head -1 | cut -d= -f2- || true; }
+# `$$` -> `$`: docker compose interpolates `$` in .env, so values containing it (the scrypt
+# password_hash, `scrypt$16384$8$1$salt$dk`) MUST be written escaped as `$$` or compose warns and
+# blanks them. This script reads the same file, so it un-escapes on the way out.
+getenv() { [ -f "$ROOT/.env" ] && grep -E "^$1=" "$ROOT/.env" | head -1 | cut -d= -f2- | sed 's/\$\$/$/g' || true; }
 export HERMES_DASH_USER="${HERMES_DASH_USER:-$(getenv HERMES_DASH_USER)}"
 export HERMES_DASH_PW_HASH="${HERMES_DASH_PW_HASH:-$(getenv HERMES_DASH_PW_HASH)}"
 export OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-$(getenv OPENROUTER_API_KEY)}"
@@ -42,9 +45,11 @@ if [ ! -x "$VENV_HERMES" ] && [ ! -x "$HOME/.local/bin/hermes" ]; then
   if [ -n "${HERMES_INSTALL_CMD:-}" ]; then
     echo "-- base hermes-agent missing; running HERMES_INSTALL_CMD"; eval "$HERMES_INSTALL_CMD"
   else
-    echo "!! hermes-agent not installed. Install it first (needs NousResearch access):" >&2
-    echo "   git clone git@github.com:NousResearch/hermes-agent.git ~/.hermes/hermes-agent" >&2
-    echo "   then create its venv per its README, or set HERMES_INSTALL_CMD and re-run." >&2
+    echo "!! hermes-agent not installed. NousResearch/hermes-agent is PUBLIC — use the official" >&2
+    echo "   installer (handles uv, Python 3.11, node, ripgrep, ffmpeg; Linux/macOS/WSL2/Termux):" >&2
+    echo "   curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash" >&2
+    echo "   It lands at ~/.hermes/hermes-agent + ~/.local/bin/hermes, which is what we look for." >&2
+    echo "   Then re-run this script (or set HERMES_INSTALL_CMD to the line above)." >&2
     exit 1
   fi
 fi

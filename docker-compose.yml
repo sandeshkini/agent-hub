@@ -32,8 +32,10 @@ services:
       # a FRESH `open-webui` volume — the value is persisted in the DB (`auth.enable_api_keys`), so on
       # an existing volume flip it in Admin Settings → General instead.
       ENABLE_API_KEYS: "${ENABLE_API_KEYS:-true}"
-      OPENAI_API_BASE_URLS: "http://owui-hermes:9211/v1;http://owui-claude:9212/v1;http://owui-opencode:9213/v1"
-      OPENAI_API_KEYS: "${ADAPTER_KEY};${ADAPTER_KEY};${ADAPTER_KEY}"
+      # local adapters (hermes/claude/opencode) + optional remote-node connections appended via MB_* (E10.7)
+      OPENAI_API_BASE_URLS: "http://owui-hermes:9211/v1;http://owui-claude:9212/v1;http://owui-opencode:9213/v1${MB_OPENAI_URLS:-}"
+      OPENAI_API_KEYS: "${ADAPTER_KEY};${ADAPTER_KEY};${ADAPTER_KEY}${MB_OPENAI_KEYS:-}"
+      OPENAI_API_CONFIGS: "${MB_OPENAI_CONFIGS:-{}}"   # per-connection cfg (prefix_id for remote nodes → mb.*)
       ADAPTER_KEY: "${ADAPTER_KEY}"                # E7: /api/agent/answer proxies to owui-claude with this
       CLAUDE_ADAPTER_URL: "http://owui-claude:9212"
       ENABLE_FORWARD_USER_INFO_HEADERS: "true"   # forwards X-OpenWebUI-Chat-Id -> session continuity
@@ -65,7 +67,8 @@ services:
       DEFAULT_MODEL_PARAMS: '{"function_calling":"legacy"}'
       # NATIVE terminal feature: register the host owui-terminal PTY service as an OWUI terminal server.
       # id MUST equal this box's TERMINAL_ID or the machine selector can't match the terminal to the machine.
-      TERMINAL_SERVER_CONNECTIONS: '[{"id":"${TERMINAL_ID:-aibo}","name":"${TERMINAL_NAME:-aibo (host shell)}","url":"http://host.docker.internal:7681","auth_type":"bearer","key":"${TERMINAL_TOKEN}","enabled":true,"access_control":null}]'
+      # Default = this box's host shell. Multi-machine: override with TERMINAL_SERVERS_JSON in .env (aibo + remote nodes).
+      TERMINAL_SERVER_CONNECTIONS: "${TERMINAL_SERVERS_JSON:-[{\"id\":\"${TERMINAL_ID:-aibo}\",\"name\":\"${TERMINAL_NAME:-aibo (host shell)}\",\"url\":\"http://host.docker.internal:7681\",\"auth_type\":\"bearer\",\"key\":\"${TERMINAL_TOKEN}\",\"enabled\":true,\"access_control\":null}]}"
     depends_on:
       - owui-hermes
       - owui-claude

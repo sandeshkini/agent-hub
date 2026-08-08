@@ -73,10 +73,10 @@ index 0000000..ee17b5d
 +        raise HTTPException(status_code=502, detail=f"adapter unreachable: {e}")
 diff --git a/backend/open_webui/routers/agent_inbox.py b/backend/open_webui/routers/agent_inbox.py
 new file mode 100644
-index 0000000..b956500
+index 0000000..80eaf61
 --- /dev/null
 +++ b/backend/open_webui/routers/agent_inbox.py
-@@ -0,0 +1,165 @@
+@@ -0,0 +1,171 @@
 +# LOCAL PATCH (agent-hub fork): E2 Inbox with real-time smart summaries.
 +# Returns the user's chat list (same snippet/active/unread data as OWUI's list) with a one-line
 +# LLM summary attached per chat. Summaries are cached and regenerated ONLY when a chat changes
@@ -130,8 +130,14 @@ index 0000000..b956500
 +
 +
 +_SUMMARY_INSTRUCTION = (
-+    "Write a concise summary of what this conversation is about, in at most 140 characters "
-+    "(one line, may be a phrase or short sentence). Output ONLY the summary — no quotes, no preamble."
++    "You are writing a one-line label for a chat so its owner can glance at their inbox and "
++    "instantly recall what's in it. In at most 140 characters, state the SUBSTANCE of the "
++    "assistant's latest work — what it answered, found, concluded, or is currently doing — "
++    "as if telling the owner the takeaway. Prefer the assistant's most recent message. "
++    "Write it as a direct statement of content/outcome in plain language. "
++    "Do NOT narrate the exchange, and do NOT use the words 'user' or 'assistant' "
++    "(never 'user asks…', 'assistant replies…'). "
++    "Output ONLY the label line — no quotes, no preamble."
 +)
 +SUMMARY_MAX_CHARS = int(os.environ.get("SUMMARY_MAX_CHARS", "140"))
 +

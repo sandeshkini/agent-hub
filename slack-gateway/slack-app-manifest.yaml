@@ -1,0 +1,35 @@
+# Slack app manifest — create at https://api.slack.com/apps → "From an app manifest", paste this.
+# Then: Basic Information → App-Level Tokens → generate one with scope connections:write (that's SLACK_APP_TOKEN, xapp-…);
+# Install to Workspace → Bot User OAuth Token (xoxb-…) = SLACK_BOT_TOKEN. Enable Socket Mode.
+display_information:
+  name: Agent Hub
+  description: Chat with any Agent Hub model/agent from Slack
+features:
+  bot_user:
+    display_name: agent-hub
+    always_online: true
+  slash_commands:
+    - command: /model
+      description: List hub models / show the model picker
+      should_escape: false
+oauth_config:
+  scopes:
+    bot:
+      - app_mentions:read
+      - chat:write
+      - commands
+      - im:history
+      - im:read
+      - im:write
+      - channels:history
+      - groups:history
+      - files:read
+settings:
+  event_subscriptions:
+    bot_events:
+      - app_mention
+      - message.im
+  interactivity:
+    is_enabled: true
+  socket_mode_enabled: true
+  org_deploy_enabled: false

@@ -201,6 +201,24 @@ services:
       TERMINAL_KEY: "${TERMINAL_KEY:-}"
       HEARTBEAT_SECONDS: "${HEARTBEAT_SECONDS:-30}"
 
+  # Slack as a first-class hub frontend (chat with any model/agent from Slack). OPT-IN profile so it
+  # only starts once you've set the tokens: add `slack` to COMPOSE_PROFILES (e.g. COMPOSE_PROFILES=hub,slack).
+  slack-gateway:
+    build: ./slack-gateway
+    image: agent-hub/slack-gateway
+    container_name: slack-gateway
+    profiles: ["slack"]
+    restart: unless-stopped
+    environment:
+      SLACK_BOT_TOKEN: "${SLACK_BOT_TOKEN:-}"
+      SLACK_APP_TOKEN: "${SLACK_APP_TOKEN:-}"
+      OWUI_BASE: "http://open-webui:8080"
+      OWUI_API_KEY: "${OWUI_API_KEY:-}"
+      DEFAULT_MODEL: "${SLACK_DEFAULT_MODEL:-claude-sonnet-5}"
+      SLACK_STATE_PATH: "/state/sessions.json"
+    volumes:
+      - ./slack-gateway/state:/state
+
 volumes:
   open-webui:
     external: true

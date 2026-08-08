@@ -152,9 +152,19 @@ async function* streamTurn(chatId, model, messages, ctx = {}) {
   // strictMcpConfig: load ONLY this MCP server (ignore any host/project .mcp.json so the agent doesn't
   // pick up unrelated servers like claude-monitor via the /home/beastblaster mount).
   {
+    // Standard MCP wiring. Each MCP_SERVERS entry is a STANDARD MCP server config carrying a `name`:
+    //   HTTP/SSE:  {"name":"linear","type":"http","url":"https://mcp.linear.app/mcp","headers":{...}}
+    //   stdio:     {"name":"x","type":"stdio","command":"npx","args":["-y","pkg"],"env":{...}}
+    // We pass the config through to the Agent SDK verbatim (minus `name`), so any standard field works.
+    // Add a server ONCE in .env MCP_SERVERS → every adapter gets it (see mcp/README.md).
     const mcpServers = {};
-    if (MCP_TOOLS_URL) mcpServers.tools = { type: "http", url: MCP_TOOLS_URL };
-    for (const s of EXTRA_MCP) if (s && s.name && s.url) mcpServers[s.name] = { type: s.type || "http", url: s.url };
+    if (MCP_TOOLS_URL) mcpServers.tools = { type: "http", url: MCP_TOOLS_URL };   // built-in publish_artifact/notify
+    for (const s of EXTRA_MCP) {
+      if (!s || !s.name) continue;
+      const { name, ...cfg } = s;
+      if (!cfg.type) cfg.type = cfg.url ? "http" : "stdio";   // infer transport if omitted
+      mcpServers[name] = cfg;
+    }
     if (Object.keys(mcpServers).length) { opts.mcpServers = mcpServers; opts.strictMcpConfig = true; }
   }
   if (sys) opts.appendSystemPrompt = sys;                                   // also as a real system prompt (covers image turns)

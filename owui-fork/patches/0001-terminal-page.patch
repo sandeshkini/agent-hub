@@ -1,5 +1,5 @@
 diff --git a/backend/open_webui/main.py b/backend/open_webui/main.py
-index 55613ac..749d08b 100644
+index 55613ac..069313c 100644
 --- a/backend/open_webui/main.py
 +++ b/backend/open_webui/main.py
 @@ -138,6 +138,9 @@ from open_webui.models.models import Models
@@ -12,13 +12,15 @@ index 55613ac..749d08b 100644
      audio,
      auths,
      automations,
-@@ -822,6 +825,9 @@ if ENABLE_ADMIN_ANALYTICS:
+@@ -822,6 +825,11 @@ if ENABLE_ADMIN_ANALYTICS:
  app.include_router(utils.router, prefix='/api/v1/utils', tags=['utils'])
  app.include_router(terminals.router, prefix='/api/v1/terminals', tags=['terminals'])
  app.include_router(automations.router, prefix='/api/v1/automations', tags=['automations'])
-+app.include_router(agent_inbox.router, prefix='/api/inbox', tags=['inbox'])  # LOCAL PATCH
-+app.include_router(agent_nodes.router, prefix='/api/nodes', tags=['nodes'])  # LOCAL PATCH
-+app.include_router(agent_answer.router, prefix='/api/agent', tags=['agent'])  # LOCAL PATCH (E7)
++# LOCAL PATCH: mount under /api/v1 to match the frontend's WEBUI_API_BASE_URL (=/api/v1). Mounting at
++# /api/* instead silently fell through to the SvelteKit SPA catch-all (200 HTML) → fetch().json() failed.
++app.include_router(agent_inbox.router, prefix='/api/v1/inbox', tags=['inbox'])  # LOCAL PATCH
++app.include_router(agent_nodes.router, prefix='/api/v1/nodes', tags=['nodes'])  # LOCAL PATCH
++app.include_router(agent_answer.router, prefix='/api/v1/agent', tags=['agent'])  # LOCAL PATCH (E7)
  app.include_router(calendar.router, prefix='/api/v1/calendars', tags=['calendars'])
  
  # SCIM 2.0 API for identity management
@@ -71,10 +73,10 @@ index 0000000..ee17b5d
 +        raise HTTPException(status_code=502, detail=f"adapter unreachable: {e}")
 diff --git a/backend/open_webui/routers/agent_inbox.py b/backend/open_webui/routers/agent_inbox.py
 new file mode 100644
-index 0000000..29024e9
+index 0000000..759747b
 --- /dev/null
 +++ b/backend/open_webui/routers/agent_inbox.py
-@@ -0,0 +1,160 @@
+@@ -0,0 +1,162 @@
 +# LOCAL PATCH (agent-hub fork): E2 Inbox with real-time smart summaries.
 +# Returns the user's chat list (same snippet/active/unread data as OWUI's list) with a one-line
 +# LLM summary attached per chat. Summaries are cached and regenerated ONLY when a chat changes
@@ -151,7 +153,9 @@ index 0000000..29024e9
 +            {"role": "user", "content": "Conversation:\n" + text[:4000]},
 +        ],
 +    }
-+    headers = {"Content-Type": "application/json"}
++    # UA header: the OpenCode Zen gateway 403s generic clients — present as the opencode client.
++    # Harmless for OpenRouter/other OpenAI-compatible endpoints.
++    headers = {"Content-Type": "application/json", "User-Agent": os.environ.get("SUMMARY_USER_AGENT", "opencode/1.18.14")}
 +    if SUMMARY_API_KEY:
 +        headers["Authorization"] = f"Bearer {SUMMARY_API_KEY}"
 +    async with aiohttp.ClientSession() as s:

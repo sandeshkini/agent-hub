@@ -189,7 +189,7 @@ services:
     profiles: ["hub", "node"]
     restart: unless-stopped
     environment:
-      HUB_REGISTER_URL: "${HUB_REGISTER_URL:-http://open-webui:8080/api/nodes/register}"
+      HUB_REGISTER_URL: "${HUB_REGISTER_URL:-http://open-webui:8080/api/v1/nodes/register}"
       NODE_HUB_TOKEN: "${NODE_HUB_TOKEN:-}"
       NODE_LABEL: "${NODE_LABEL:-aibo}"
       NODE_URL: "${NODE_URL:-http://open-webui:8080}"

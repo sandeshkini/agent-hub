@@ -28,6 +28,7 @@ getenv() { [ -f "$ROOT/.env" ] && grep -E "^$1=" "$ROOT/.env" | head -1 | cut -d
 export HERMES_DASH_USER="${HERMES_DASH_USER:-$(getenv HERMES_DASH_USER)}"
 export HERMES_DASH_PW_HASH="${HERMES_DASH_PW_HASH:-$(getenv HERMES_DASH_PW_HASH)}"
 export OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-$(getenv OPENROUTER_API_KEY)}"
+export MCP_SERVERS="${MCP_SERVERS:-$(getenv MCP_SERVERS)}"
 HERMES_INSTALL_CMD="${HERMES_INSTALL_CMD:-$(getenv HERMES_INSTALL_CMD)}"
 
 HERMES_HOME="$HOME/.hermes"; SVC="hermes-dashboard"
@@ -54,9 +55,28 @@ mkdir -p "$HERMES_HOME/hooks" "$HERMES_HOME/bin"
 python3 - "$DIR/config.yaml.template" "$HERMES_HOME/config.yaml" "$HERMES_HOME" <<'PY'
 import os, sys
 tpl, dst, home = sys.argv[1], sys.argv[2], sys.argv[3]
+import json
 s = open(tpl).read().replace('__HERMES_HOME__', home)
 for k in ('HERMES_DASH_USER', 'HERMES_DASH_PW_HASH'):
     s = s.replace('${'+k+'}', os.environ.get(k, ''))
+# External MCP hub: merge http entries from MCP_SERVERS into mcp_servers (one place -> all agents).
+# Only round-trips YAML when there ARE extra servers (keeps the default byte-identical); guarded on PyYAML.
+try:
+    extra = [e for e in json.loads(os.environ.get('MCP_SERVERS', '') or '[]')
+             if isinstance(e, dict) and e.get('name') and e.get('url')]
+except Exception:
+    extra = []
+if extra:
+    try:
+        import yaml
+        cfg = yaml.safe_load(s); cfg.setdefault('mcp_servers', {})
+        for e in extra:
+            entry = {'url': e['url']}
+            if e.get('headers'): entry['headers'] = e['headers']
+            cfg['mcp_servers'][e['name']] = entry
+        s = yaml.safe_dump(cfg, sort_keys=False)
+    except Exception as ex:
+        print('   (MCP_SERVERS merge skipped: %s)' % ex)
 open(dst, 'w').write(s)
 print('   config.yaml written')
 PY

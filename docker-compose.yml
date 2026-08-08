@@ -119,7 +119,9 @@ services:
       CLAUDE_MODEL: "${CLAUDE_MODEL}"
       MCP_SERVERS: "${MCP_SERVERS:-[]}"           # external MCP hub: one place -> all adapters
       WORKSPACE: "${WORKSPACE:-${HOME}}"
-      HOME: "/home/node"
+      # HOME must equal the mounted workspace or `~` resolves to an empty dir in the image and the
+      # agent concludes it has no filesystem — even though ${WORKSPACE} is mounted read/write.
+      HOME: "${WORKSPACE:-${HOME}}"
 
   opencode:
     build: ./opencode
@@ -136,7 +138,8 @@ services:
     environment:
       OPENCODE_API_KEY: "${OPENCODE_API_KEY}"
       MCP_SERVERS: "${MCP_SERVERS:-[]}"           # external MCP hub: one place -> all adapters
-      HOME: "/home/node"
+      # same as owui-claude: `~` must be the mounted workspace, not an empty dir in the image
+      HOME: "${WORKSPACE:-${HOME}}"
 
   owui-opencode:
     build: ./owui-opencode

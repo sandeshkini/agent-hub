@@ -12,20 +12,36 @@
 :8088 {
 	# SECURITY: overwrite client-supplied forwarding headers so they can't be spoofed into backend logs.
 	# (Backends auth via Bearer, not X-Forwarded, so this is defense-in-depth.)
-	header_up X-Forwarded-For {remote_host}
-	header_up X-Forwarded-Proto https
+	# NOTE: header_up is a reverse_proxy subdirective — at site level Caddy fails to start with
+	# "unrecognized directive: header_up", so it must live inside each reverse_proxy block.
 
 	# Claude adapter → /claude/v1/...  (OWUI connection base: https://register.mb.<domain>/claude/v1)
 	handle_path /claude/* {
-		reverse_proxy owui-claude:9212
+		reverse_proxy owui-claude:9212 {
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto https
+		}
 	}
 	# OpenCode adapter → /opencode/v1/...
 	handle_path /opencode/* {
-		reverse_proxy owui-opencode:9213
+		reverse_proxy owui-opencode:9213 {
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto https
+		}
+	}
+	# Hermes adapter → /hermes/v1/...  (the brain itself is a host service on :9119; this is its adapter)
+	handle_path /hermes/* {
+		reverse_proxy owui-hermes:9211 {
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto https
+		}
 	}
 	# Terminal (owui-terminal runs on the host) → /term/api/terminals/{id} (WebSocket)
 	handle_path /term/* {
-		reverse_proxy host.docker.internal:7681
+		reverse_proxy host.docker.internal:7681 {
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto https
+		}
 	}
 	# Health probe for the hub's node-pin heartbeat.
 	handle /health {

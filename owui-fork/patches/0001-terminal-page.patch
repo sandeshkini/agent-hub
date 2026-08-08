@@ -1,18 +1,19 @@
 diff --git a/backend/open_webui/main.py b/backend/open_webui/main.py
-index 55613ac..069313c 100644
+index 55613ac..798b2cf 100644
 --- a/backend/open_webui/main.py
 +++ b/backend/open_webui/main.py
-@@ -138,6 +138,9 @@ from open_webui.models.models import Models
+@@ -138,6 +138,10 @@ from open_webui.models.models import Models
  from open_webui.models.users import Users
  from open_webui.routers import (
      analytics,
 +    agent_inbox,  # LOCAL PATCH (agent-hub fork): inbox summaries
 +    agent_nodes,  # LOCAL PATCH (agent-hub fork): multi-machine node registry (E4/E5)
 +    agent_answer,  # LOCAL PATCH (agent-hub fork): AskUserQuestion answer relay (E7)
++    agent_terminal_sync,  # LOCAL PATCH (agent-hub fork): cross-device terminal-session sync
      audio,
      auths,
      automations,
-@@ -822,6 +825,11 @@ if ENABLE_ADMIN_ANALYTICS:
+@@ -822,6 +826,12 @@ if ENABLE_ADMIN_ANALYTICS:
  app.include_router(utils.router, prefix='/api/v1/utils', tags=['utils'])
  app.include_router(terminals.router, prefix='/api/v1/terminals', tags=['terminals'])
  app.include_router(automations.router, prefix='/api/v1/automations', tags=['automations'])
@@ -21,6 +22,7 @@ index 55613ac..069313c 100644
 +app.include_router(agent_inbox.router, prefix='/api/v1/inbox', tags=['inbox'])  # LOCAL PATCH
 +app.include_router(agent_nodes.router, prefix='/api/v1/nodes', tags=['nodes'])  # LOCAL PATCH
 +app.include_router(agent_answer.router, prefix='/api/v1/agent', tags=['agent'])  # LOCAL PATCH (E7)
++app.include_router(agent_terminal_sync.router, prefix='/api/v1/terminal-sessions', tags=['terminals'])  # LOCAL PATCH
  app.include_router(calendar.router, prefix='/api/v1/calendars', tags=['calendars'])
  
  # SCIM 2.0 API for identity management
@@ -366,6 +368,87 @@ index 0000000..eed014f
 +        raise HTTPException(status_code=403, detail="admin only")
 +    existed = _nodes.pop(node_id, None) is not None
 +    return {"deleted": existed}
+diff --git a/backend/open_webui/routers/agent_terminal_sync.py b/backend/open_webui/routers/agent_terminal_sync.py
+new file mode 100644
+index 0000000..d34651e
+--- /dev/null
++++ b/backend/open_webui/routers/agent_terminal_sync.py
+@@ -0,0 +1,75 @@
++# LOCAL PATCH (agent-hub fork): cross-device terminal-session sync.
++#
++# The terminal-session LIST (which shells are open, their names, the active one, and which machine
++# each is on) is otherwise kept only in the browser's localStorage — so it doesn't follow you across
++# devices. This tiny per-user store persists that list server-side (in the OWUI data volume) so every
++# device logged into the hub sees the same open terminals, exactly like chats. The actual PTYs already
++# live server-side on each machine's owui-terminal keyed by session id, so opening the same id on a
++# second device re-attaches to the same live shell.
++#
++# Model: last-writer-wins by a monotonic `rev` (client-supplied ms timestamp). Small JSON blob per user.
++import json
++import os
++import threading
++
++from fastapi import APIRouter, Depends, Request
++from open_webui.env import DATA_DIR
++from open_webui.utils.auth import get_verified_user
++
++router = APIRouter()
++
++_STORE = os.path.join(str(DATA_DIR), "agent_terminal_sessions.json")
++_lock = threading.Lock()
++
++
++def _read_all() -> dict:
++    try:
++        with open(_STORE, "r", encoding="utf-8") as f:
++            d = json.load(f)
++            return d if isinstance(d, dict) else {}
++    except Exception:
++        return {}
++
++
++def _write_all(d: dict) -> None:
++    tmp = _STORE + ".tmp"
++    with open(tmp, "w", encoding="utf-8") as f:
++        json.dump(d, f)
++    os.replace(tmp, _STORE)  # atomic
++
++
++def _blank() -> dict:
++    return {"sessions": [], "activeId": "", "rev": 0}
++
++
++@router.get("/")
++async def get_sessions(user=Depends(get_verified_user)):
++    """Return this user's persisted terminal-session list ({sessions, activeId, rev})."""
++    with _lock:
++        return _read_all().get(user.id) or _blank()
++
++
++@router.put("/")
++async def put_sessions(request: Request, user=Depends(get_verified_user)):
++    """Upsert this user's terminal-session list. Last-writer-wins by `rev` (client ms timestamp);
++    a stale write (older rev than what's stored) is ignored and the current server state returned."""
++    try:
++        body = await request.json()
++    except Exception:
++        body = {}
++    incoming = {
++        "sessions": body.get("sessions") if isinstance(body.get("sessions"), list) else [],
++        "activeId": str(body.get("activeId") or ""),
++        "rev": int(body.get("rev") or 0),
++    }
++    with _lock:
++        alld = _read_all()
++        cur = alld.get(user.id) or _blank()
++        if incoming["rev"] < int(cur.get("rev") or 0):
++            return cur  # stale write — keep newer server state
++        alld[user.id] = incoming
++        try:
++            _write_all(alld)
++        except Exception:
++            pass
++        return incoming
 diff --git a/src/lib/components/chat/AgentQuestion.svelte b/src/lib/components/chat/AgentQuestion.svelte
 new file mode 100644
 index 0000000..cc84218
@@ -999,49 +1082,136 @@ index 0000000..b5b9113
 +}
 diff --git a/src/lib/utils/agentTerminals.ts b/src/lib/utils/agentTerminals.ts
 new file mode 100644
-index 0000000..df40d44
+index 0000000..cbce732
 --- /dev/null
 +++ b/src/lib/utils/agentTerminals.ts
-@@ -0,0 +1,86 @@
-+// LOCAL PATCH (agent-hub fork): shared terminal-session store.
-+// Terminal sessions live in the left sidebar (like chats) and drive the /terminal page. Kept in a
-+// shared store (persisted to localStorage) so the sidebar, the page, and the future inbox stay in
-+// sync. Each session = its own persistent shell on host `owui-terminal` via OWUI's /api/v1/terminals
-+// proxy. Closing a session also kills the backend shell.
+@@ -0,0 +1,176 @@
++// LOCAL PATCH (agent-hub fork): shared terminal-session store — now CROSS-DEVICE SYNCED.
++// Terminal sessions live in the left sidebar (like chats) and drive the /terminal page. The list is
++// cached in localStorage for instant paint AND persisted server-side (fork `/api/v1/terminal-sessions`)
++// so every device logged into the hub sees the same open terminals. The actual PTYs live server-side on
++// each machine's owui-terminal keyed by session id, so opening the same id on a 2nd device re-attaches
++// to the same live shell. Sync is last-writer-wins by a monotonic `rev` (ms timestamp); we push on
++// local change (debounced) and pull on focus + a light poll.
 +import { writable, get } from 'svelte/store';
 +import { browser } from '$app/environment';
 +import { WEBUI_API_BASE_URL } from '$lib/constants';
 +
-+export type TerminalSession = { id: string; name: string; createdAt: number; pinned?: boolean };
++export type TerminalSession = {
++	id: string;
++	name: string;
++	createdAt: number;
++	pinned?: boolean;
++	serverId?: string; // which machine this shell runs on (multi-machine); optional
++};
 +
 +const LS_KEY = 'agent-hub:terminal-sessions';
 +const SERVER_ID = 'aibo';
++const SYNC_URL = `${WEBUI_API_BASE_URL}/terminal-sessions/`;
++const PUSH_DEBOUNCE = 800;
++const POLL_MS = 15000;
 +
-+const load = (): { sessions: TerminalSession[]; activeId: string } => {
-+	if (!browser) return { sessions: [], activeId: '' };
++let _rev = 0; // monotonic revision of our current state
++let _applying = false; // suppress push while we apply server state
++let _ready = false; // don't push during initial hydration
++
++const load = (): { sessions: TerminalSession[]; activeId: string; rev: number } => {
++	if (!browser) return { sessions: [], activeId: '', rev: 0 };
 +	try {
 +		const s = JSON.parse(localStorage.getItem(LS_KEY) || '{}');
-+		return { sessions: Array.isArray(s.sessions) ? s.sessions : [], activeId: s.activeId || '' };
++		return {
++			sessions: Array.isArray(s.sessions) ? s.sessions : [],
++			activeId: s.activeId || '',
++			rev: Number(s.rev) || 0
++		};
 +	} catch {
-+		return { sessions: [], activeId: '' };
++		return { sessions: [], activeId: '', rev: 0 };
 +	}
 +};
 +
 +const _init = load();
++_rev = _init.rev;
 +export const terminalSessions = writable<TerminalSession[]>(_init.sessions);
 +export const activeTerminalId = writable<string>(_init.activeId);
 +
-+const persist = () => {
++const persistLocal = () => {
 +	if (!browser) return;
 +	try {
 +		localStorage.setItem(
 +			LS_KEY,
-+			JSON.stringify({ sessions: get(terminalSessions), activeId: get(activeTerminalId) })
++			JSON.stringify({ sessions: get(terminalSessions), activeId: get(activeTerminalId), rev: _rev })
 +		);
 +	} catch {}
 +};
-+terminalSessions.subscribe(persist);
-+activeTerminalId.subscribe(persist);
++
++const token = () => (browser ? localStorage.getItem('token') ?? '' : '');
++
++// Apply an authoritative server state without triggering a push back.
++const applyServer = (state: { sessions?: TerminalSession[]; activeId?: string; rev?: number }) => {
++	const rev = Number(state?.rev) || 0;
++	if (rev <= _rev) return; // not newer — ignore
++	_applying = true;
++	try {
++		terminalSessions.set(Array.isArray(state.sessions) ? state.sessions : []);
++		activeTerminalId.set(state.activeId || '');
++		_rev = rev;
++		persistLocal();
++	} finally {
++		_applying = false;
++	}
++};
++
++let _pushTimer: any = null;
++const schedulePush = () => {
++	if (!browser) return;
++	if (_pushTimer) clearTimeout(_pushTimer);
++	_pushTimer = setTimeout(async () => {
++		_pushTimer = null;
++		const payload = { sessions: get(terminalSessions), activeId: get(activeTerminalId), rev: _rev };
++		try {
++			const r = await fetch(SYNC_URL, {
++				method: 'PUT',
++				headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token()}` },
++				body: JSON.stringify(payload)
++			});
++			if (r.ok) applyServer(await r.json()); // adopt if the server had a newer state
++		} catch {}
++	}, PUSH_DEBOUNCE);
++};
++
++export const pullTerminalSessions = async () => {
++	if (!browser) return;
++	try {
++		const r = await fetch(SYNC_URL, { headers: { Authorization: `Bearer ${token()}` } });
++		if (r.ok) applyServer(await r.json());
++	} catch {}
++};
++
++// React to any change: cache locally, and (once hydrated, and not mid-apply) bump rev + push.
++const onChange = () => {
++	if (!browser) return;
++	if (_ready && !_applying) {
++		_rev = Date.now();
++	}
++	persistLocal();
++	if (_ready && !_applying) schedulePush();
++};
++terminalSessions.subscribe(onChange);
++activeTerminalId.subscribe(onChange);
++
++// Resolves once the first server pull completes — so we never auto-create a shell (and clobber the
++// server's list) before we've seen what other devices already have open.
++let _hydrateResolve: (() => void) | null = null;
++const _hydrated: Promise<void> = browser ? new Promise((r) => (_hydrateResolve = r)) : Promise.resolve();
++
++if (browser) {
++	_ready = true;
++	// Initial hydrate from server, then keep fresh on focus + a light poll.
++	pullTerminalSessions().finally(() => _hydrateResolve?.());
++	window.addEventListener('focus', pullTerminalSessions);
++	window.addEventListener('online', pullTerminalSessions);
++	setInterval(pullTerminalSessions, POLL_MS);
++}
 +
 +const uid = () =>
 +	'term-' + (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -1059,7 +1229,7 @@ index 0000000..df40d44
 +		try {
 +			await fetch(`${WEBUI_API_BASE_URL}/terminals/${SERVER_ID}/api/terminals/${id}`, {
 +				method: 'DELETE',
-+				headers: { Authorization: `Bearer ${localStorage.getItem('token') ?? ''}` }
++				headers: { Authorization: `Bearer ${token()}` }
 +			});
 +		} catch {}
 +	}
@@ -1084,7 +1254,10 @@ index 0000000..df40d44
 +};
 +
 +// Ensure there's at least one session and a valid active one (call on the /terminal page).
-+export const ensureTerminalSession = () => {
++// Awaits the initial server hydrate first so we don't create a spurious shell that overwrites the
++// list another device already has open.
++export const ensureTerminalSession = async () => {
++	await _hydrated;
 +	if (get(terminalSessions).length === 0) newTerminalSession();
 +	const list = get(terminalSessions);
 +	if (!list.find((x) => x.id === get(activeTerminalId))) activeTerminalId.set(list[0]?.id ?? '');
@@ -1311,7 +1484,7 @@ index 0000000..074da74
 +</div>
 diff --git a/src/routes/(app)/terminal/+page.svelte b/src/routes/(app)/terminal/+page.svelte
 new file mode 100644
-index 0000000..b16c932
+index 0000000..b7eb9d1
 --- /dev/null
 +++ b/src/routes/(app)/terminal/+page.svelte
 @@ -0,0 +1,148 @@
@@ -1385,7 +1558,7 @@ index 0000000..b16c932
 +			(servers ?? []).find((s: any) => s.id === SERVER_ID) ??
 +			(servers ?? [])[0];
 +		if (t?.id) { selectedTerminalId.set(t.id); hasServer = true; }
-+		ensureTerminalSession();
++		await ensureTerminalSession();
 +		loaded = true;
 +	});
 +</script>

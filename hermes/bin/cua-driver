@@ -1,0 +1,205 @@
+#!/usr/bin/env python3
+"""cua-driver WRAPPER — makes Hermes computer_use's AT-SPI walk bound survive `hermes update`.
+
+WHY: cua-driver 0.19.0's get_window_state walks the FULL AT-SPI tree UNBOUNDED. On heavy apps
+(Firefox: thousands of a11y nodes) the walk takes >30s and blows past Hermes's call_tool timeout →
+capture returns an empty "capture failed:". 0.19.0 expects callers to bound the walk
+(max_elements/max_depth); the installed Hermes doesn't. A source patch to cua_backend.py works but
+is wiped by `hermes update`. This wrapper does the same injection EXTERNALLY, so it survives updates.
+
+HOW Hermes uses it: point HERMES_CUA_DRIVER_CMD at this file. Hermes then:
+  * runs `<wrapper> manifest`  -> we rewrite mcp_invocation.command to THIS wrapper, so Hermes
+                                  spawns us (not the raw binary) for the MCP server.
+  * runs `<wrapper> mcp ...`   -> we proxy the stdio JSON-RPC stream, injecting max_depth/
+                                  max_elements into every get_window_state tools/call.
+  * runs `<wrapper> call get_window_state <json>` (CLI fallback) -> inject into the JSON arg.
+  * everything else           -> exec the real binary unchanged.
+
+FAIL-OPEN: any parse/inject error forwards the original bytes untouched (worst case = the old
+unbounded behavior, never a hard break). See ~/Documents/aibo-server/Services/hermes.md.
+"""
+import json, os, sys, subprocess, threading
+
+REAL = os.environ.get("CUA_DRIVER_REAL", os.path.expanduser("~/.local/bin/cua-driver"))
+SELF = os.path.realpath(__file__)
+try:
+    MAX_DEPTH = int(os.environ.get("HERMES_CUA_MAX_DEPTH", "10"))
+except ValueError:
+    MAX_DEPTH = 10
+try:
+    MAX_ELEMENTS = int(os.environ.get("HERMES_CUA_MAX_ELEMENTS", "250"))
+except ValueError:
+    MAX_ELEMENTS = 250
+
+
+def _inject(argmap):
+    """setdefault bounds into a get_window_state arguments dict."""
+    if MAX_DEPTH > 0:
+        argmap.setdefault("max_depth", MAX_DEPTH)
+    if MAX_ELEMENTS > 0:
+        argmap.setdefault("max_elements", MAX_ELEMENTS)
+    return argmap
+
+
+def do_manifest(argv):
+    """Run real `manifest`, rewrite mcp_invocation.command -> this wrapper, print."""
+    out = subprocess.run([REAL] + argv, capture_output=True, text=True)
+    txt = out.stdout
+    try:
+        m = json.loads(txt)
+        inv = m.get("mcp_invocation")
+        if isinstance(inv, dict):
+            inv["command"] = SELF          # make Hermes spawn US for `mcp`
+            inv.setdefault("args", ["mcp"])
+        txt = json.dumps(m)
+    except Exception:
+        pass                                # fail-open: emit the real manifest untouched
+    sys.stdout.write(txt)
+    sys.stdout.flush()
+    if out.stderr:
+        sys.stderr.write(out.stderr)
+    return out.returncode
+
+
+def do_call(argv):
+    """`call <tool> <json>` — inject bounds into get_window_state's JSON positional arg."""
+    try:
+        if len(argv) >= 3 and argv[1] == "get_window_state":
+            argmap = json.loads(argv[2])
+            if isinstance(argmap, dict):
+                argv = list(argv)
+                argv[2] = json.dumps(_inject(argmap))
+    except Exception:
+        pass                                # fail-open
+    os.execv(REAL, [REAL] + argv)
+
+
+def do_mcp(argv):
+    """Proxy the stdio MCP JSON-RPC stream, injecting get_window_state bounds. SELF-HEAL: if a
+    response says the cua-driver session expired/was revoked (the daemon restarted and cleared the
+    session registry), transparently respawn the backend, REPLAY the initialize handshake, and
+    RE-SEND the failed call — so Hermes never sees the failure and won't flail (restart the daemon or
+    fall back to scrot/vision_analyze). 'session expired' means the call never executed, so re-sending
+    is safe. Everything is fail-open + heal-capped: worst case = the old passthrough behavior."""
+    lock = threading.Lock()
+    st = {"proc": None, "init": None, "inited": None, "last": None, "init_id": None, "heals": 0}
+    MAX_HEALS = 5
+
+    def spawn():
+        return subprocess.Popen([REAL] + argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+
+    def wr(proc, data):
+        proc.stdin.write(data); proc.stdin.flush()
+
+    st["proc"] = spawn()
+
+    def upstream():  # Hermes -> real (inject get_window_state bounds; cache init + last call for heal)
+        try:
+            for line in iter(sys.stdin.buffer.readline, b""):
+                out = line
+                try:
+                    msg = json.loads(line)
+                    if isinstance(msg, dict):
+                        meth = msg.get("method")
+                        if meth == "initialize":
+                            st["init"] = line; st["init_id"] = msg.get("id")
+                        elif meth == "notifications/initialized":
+                            st["inited"] = line
+                        elif meth == "tools/call":
+                            p = msg.get("params") or {}
+                            if p.get("name") == "get_window_state":
+                                a = p.get("arguments")
+                                if isinstance(a, dict):
+                                    _inject(a); out = (json.dumps(msg) + "\n").encode()
+                            st["last"] = out
+                            st["heals"] = 0     # a new call attempt; reset the heal budget
+                except Exception:
+                    out = line              # fail-open
+                with lock:
+                    try: wr(st["proc"], out)
+                    except Exception: pass
+        except Exception:
+            pass
+        finally:
+            with lock:
+                try: st["proc"].stdin.close()
+                except Exception: pass
+
+    def is_expired(line):
+        try:
+            low = line.lower()
+            if b"session" not in low or not any(k in low for k in (b"expired", b"revoked", b"no active session", b"not found")):
+                return False
+            m = json.loads(line)
+            return isinstance(m, dict) and ("id" in m)   # a JSON-RPC RESPONSE, not a log/notification
+        except Exception:
+            return False
+
+    def heal():
+        """Fresh backend -> replay initialize (+initialized), swallow its init response, resend last call."""
+        newp = spawn()
+        if st["init"]: wr(newp, st["init"])
+        if st["inited"]: wr(newp, st["inited"])
+        if st["init_id"] is not None:
+            for _ in range(80):
+                l = newp.stdout.readline()
+                if not l: break
+                try:
+                    mm = json.loads(l)
+                    if isinstance(mm, dict) and mm.get("id") == st["init_id"]:
+                        break
+                except Exception:
+                    pass
+        if st["last"]: wr(newp, st["last"])
+        try: st["proc"].kill()
+        except Exception: pass
+        return newp
+
+    def downstream():  # real -> Hermes; heal on session-expired responses
+        while True:
+            proc = st["proc"]
+            try:
+                line = proc.stdout.readline()
+            except Exception:
+                break
+            if not line:
+                break
+            if st["init"] and st["last"] and st["heals"] < MAX_HEALS and is_expired(line):
+                sys.stderr.write("[cua-wrapper] session expired -> self-heal (respawn + replay + resend)\n"); sys.stderr.flush()
+                with lock:
+                    try:
+                        newp = heal(); st["proc"] = newp; st["heals"] += 1
+                        continue                 # swallow the expired line; read the fresh response
+                    except Exception:
+                        pass                     # fail-open: fall through and forward the expired line
+            try:
+                sys.stdout.buffer.write(line); sys.stdout.buffer.flush()
+            except Exception:
+                break
+
+    tu = threading.Thread(target=upstream, daemon=True)
+    td = threading.Thread(target=downstream, daemon=True)
+    tu.start(); td.start()
+    td.join()
+    with lock:
+        try: st["proc"].wait(timeout=2)
+        except Exception: pass
+    return 0
+
+
+def main():
+    argv = sys.argv[1:]
+    if not argv:
+        os.execv(REAL, [REAL])
+    cmd = argv[0]
+    if cmd == "manifest":
+        sys.exit(do_manifest(argv))
+    if cmd == "mcp":
+        sys.exit(do_mcp(argv))
+    if cmd == "call":
+        do_call(argv)                       # execs; never returns
+    os.execv(REAL, [REAL] + argv)           # passthrough for everything else
+
+
+if __name__ == "__main__":
+    main()

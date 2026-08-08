@@ -13,8 +13,13 @@ if [ ! -f .env ]; then
   echo "→ created .env from .env.example. Edit it (set COMPOSE_PROFILES, secrets, IPs), then re-run ./setup.sh"
   exit 0
 fi
-set -a; . ./.env; set +a
-ROLE="${COMPOSE_PROFILES:-hub}"
+# Read keys individually — do NOT bash-source .env (values may contain spaces/parens, e.g.
+# TERMINAL_NAME="aibo (host shell)", which break `source`). Docker compose reads .env with its own parser.
+getenv() { grep -E "^$1=" .env | head -1 | cut -d= -f2- || true; }
+ROLE="$(getenv COMPOSE_PROFILES)"; ROLE="${ROLE:-hub}"
+ADAPTER_BIND="$(getenv ADAPTER_BIND)"
+NODE_LABEL="$(getenv NODE_LABEL)"
+HUB_REGISTER_URL="$(getenv HUB_REGISTER_URL)"
 echo "== Agent Hub setup — role: $ROLE =="
 
 # 2) host owui-terminal (real shell) + auto-fill TERMINAL_TOKEN in .env if blank

@@ -65,6 +65,19 @@ if [ "$ROLE" = "hub" ]; then
   docker exec ollama ollama list 2>/dev/null | grep -q 'llama3.2:3b' || docker exec ollama ollama pull llama3.2:3b || true
 fi
 
+# 5.5) Hermes brain(s) — host service (computer_use needs the host GUI). Skipped gracefully if the
+#      base hermes-agent isn't installed (a node may not run Hermes; a fresh box installs it first).
+if [ -x "$HOME/.hermes/hermes-agent/venv/bin/hermes" ] || [ -x "$HOME/.local/bin/hermes" ] || [ -n "$(getenv HERMES_INSTALL_CMD)" ]; then
+  INSTANCES="$(getenv HERMES_INSTANCES)"; INSTANCES="${INSTANCES:-default:9119}"
+  echo "-- installing Hermes brain(s): $INSTANCES"
+  for inst in $(echo "$INSTANCES" | tr ',' ' '); do
+    name="${inst%%:*}"; port="${inst##*:}"; [ "$name" = "$port" ] && port=9119
+    bash ./hermes/install.sh --name "$name" --port "$port" || echo "⚠️  Hermes brain '$name' failed (see above)"
+  done
+else
+  echo "-- Hermes: base hermes-agent not installed → skipping brains (see hermes/README.md to add)"
+fi
+
 # 6) health
 echo "-- waiting for health"
 if [ "$ROLE" = "hub" ]; then

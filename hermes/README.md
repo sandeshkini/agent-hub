@@ -37,3 +37,42 @@ config/hooks/wrapper if an update ever disturbs them.
 ## Multiple brains (E8.2)
 Each brain = its own `~/.hermes-<name>/` (config + memory) + port + service, each surfaced as a
 selectable model in OWUI via the hermes adapter. Guardrail + self-heal wrapper apply to every brain.
+
+## Model routing: what runs where, and why
+
+| Layer | Runs on | Notes |
+|---|---|---|
+| **Main brain** (the agent loop) | `z-ai/glm-5.2` via OpenRouter | Current choice. glm-5.2 has no vision — hence `agent.image_input_mode: text`, which routes every image through `auxiliary.vision`. |
+| **Auxiliary** (vision, web_extract, compression, title_generation) | `owui-claude` on `localhost:9212` | The Claude Agent SDK on a Claude Code subscription. No marginal API cost. |
+| **Last-resort fallback** | OpenRouter, `:free` SKUs only | `auxiliary.free_only: true` + `auxiliary.openrouter_model` pinned to a real `:free` model. |
+
+### PARKED: putting Hermes' *main brain* on a Claude subscription
+
+Auxiliary already runs on the Claude Agent SDK (see the table above). The obvious next step — point the
+main brain at it too — **does not work as-is, and would cost you Hermes.**
+
+`owui-claude/server.mjs` never reads `body.tools`. It builds `opts.mcpServers` + `canUseTool` and runs
+the **Agent SDK's own** agentic loop with the **Agent SDK's own** tools. That is exactly why it is
+perfect for auxiliary tasks (plain completions, no tools involved) and wrong for the brain: Hermes
+would stop being able to reach `computer_use`/cua, its memory and learning loop, its skills, and its
+subagents. You would get Claude Code wearing a Hermes hat — the dashboard and the gateway, none of the
+agent.
+
+The distinction worth holding onto: **Hermes is a harness; the model is a brain it calls.** Swapping the
+brain keeps Hermes. Swapping the harness does not.
+
+**The actual work**, when we pick this up:
+
+1. Add a provider to Hermes' `PROVIDER_REGISTRY` (`hermes_cli/auth.py`) — an `anthropic-oauth` /
+   `claude-code` entry modeled on `openai-codex`, which is `auth_type: "oauth_external"` and already
+   does this trick for the Codex CLI's credentials.
+2. It must expose a **plain completions surface** so Hermes keeps driving its own loop and passing its
+   own tool definitions. This is the whole ballgame — an endpoint that runs its own loop is a harness,
+   not a provider.
+3. **Use a different Claude account's subscription than `CLAUDE_CODE_OAUTH_TOKEN`.** Hermes running a
+   long-horizon loop on the same sub as `owui-claude` (and Claude Code itself) means three agents
+   contending for one account's limits. Give it its own token — a separate `.env` var, e.g.
+   `HERMES_CLAUDE_OAUTH_TOKEN`, not the shared one.
+
+Possibly-already-there: Hermes' existing `anthropic` provider lists `CLAUDE_CODE_OAUTH_TOKEN` among its
+`api_key_env_vars`, so some of the plumbing may exist. **Untested** — verify before building anything.

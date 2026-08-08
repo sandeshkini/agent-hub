@@ -25,13 +25,21 @@ echo "== Agent Hub setup — role: $ROLE =="
 # 2) host owui-terminal (real shell) + auto-fill TERMINAL_TOKEN in .env if blank
 echo "-- installing owui-terminal (host service)"
 bash ./owui-terminal/install.sh >/tmp/owui-terminal-install.log 2>&1 || { echo "!! terminal install failed"; tail -20 /tmp/owui-terminal-install.log; exit 1; }
-TTOK="$(grep '^TERMINAL_TOKEN=' "$HOME/.config/agent-hub/terminal.env" 2>/dev/null | cut -d= -f2- || true)"
+TTOK="$(grep '^TERMINAL_TOKEN=' "$HOME/.config/agent-hub/terminal.env" 2>/dev/null | cut -d= -f2- | tr -d ' ' || true)"
+# "blank" = nothing but whitespace and/or an inline `# comment` after the `=`. The old check was
+# '^TERMINAL_TOKEN=$', which NEVER matched the shipped .env.example line (it carries trailing spaces
+# and a comment) — so the token was silently never written, and docker compose then handed OWUI the
+# comment text itself as the bearer key. Result: terminal dies with "Failed to create session: 401".
+is_blank() { grep -qE "^$1=[[:space:]]*(#.*)?$" .env; }
 if [ -n "$TTOK" ]; then
-  if grep -q '^TERMINAL_TOKEN=$' .env || ! grep -q '^TERMINAL_TOKEN=' .env; then
-    # hub uses TERMINAL_TOKEN (OWUI terminal-server), node uses TERMINAL_KEY (registrar)
-    grep -q '^TERMINAL_TOKEN=' .env && sed -i.bak "s|^TERMINAL_TOKEN=.*|TERMINAL_TOKEN=$TTOK|" .env || echo "TERMINAL_TOKEN=$TTOK" >> .env
-    echo "-- wrote TERMINAL_TOKEN into .env"
-  fi
+  # hub uses TERMINAL_TOKEN (OWUI terminal-server), node uses TERMINAL_KEY (registrar)
+  for k in TERMINAL_TOKEN TERMINAL_KEY; do
+    if ! grep -q "^$k=" .env; then
+      echo "$k=$TTOK" >> .env; echo "-- wrote $k into .env"
+    elif is_blank "$k"; then
+      sed -i.bak "s|^$k=.*|$k=$TTOK|" .env && rm -f .env.bak; echo "-- wrote $k into .env"
+    fi
+  done
 fi
 
 # 3) fork image (hub only) — build from source if missing

@@ -64,7 +64,8 @@ services:
       BYPASS_WEB_SEARCH_WEB_LOADER: "true"
       DEFAULT_MODEL_PARAMS: '{"function_calling":"legacy"}'
       # NATIVE terminal feature: register the host owui-terminal PTY service as an OWUI terminal server.
-      TERMINAL_SERVER_CONNECTIONS: '[{"id":"aibo","name":"aibo (host shell)","url":"http://host.docker.internal:7681","auth_type":"bearer","key":"${TERMINAL_TOKEN}","enabled":true,"access_control":null}]'
+      # id MUST equal this box's TERMINAL_ID or the machine selector can't match the terminal to the machine.
+      TERMINAL_SERVER_CONNECTIONS: '[{"id":"${TERMINAL_ID:-aibo}","name":"${TERMINAL_NAME:-aibo (host shell)}","url":"http://host.docker.internal:7681","auth_type":"bearer","key":"${TERMINAL_TOKEN}","enabled":true,"access_control":null}]'
     depends_on:
       - owui-hermes
       - owui-claude

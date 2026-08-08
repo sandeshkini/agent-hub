@@ -42,12 +42,47 @@ function isDestructive(input) {
   const s = JSON.stringify(input || {});
   return DENY.some(rx => rx.test(s));
 }
-const canUseTool = async (tool, input) => {
-  if ((tool === "Bash" || tool === "Shell") && isDestructive(input)) {
-    return { behavior: "deny", message: "BLOCKED by system-safety guardrail: irreversible/system-destroying command is forbidden." };
-  }
-  return { behavior: "allow", updatedInput: input };
-};
+// ── interactive AskUserQuestion (E7) ──
+// When Claude calls AskUserQuestion, we POST a `agent:question` socket event into the OWUI chat
+// message (the fork frontend renders option cards) and AWAIT the user's answer, which the browser
+// POSTs to /api/agent/answer (fork) → forwarded to this adapter's POST /answer → resolves the pending
+// promise → canUseTool returns {allow, updatedInput:{questions,answers}} so Claude continues with it.
+const pendingQ = new Map();   // qid -> { resolve, timer }
+const ANSWER_TIMEOUT = Number(process.env.ASK_TIMEOUT_MS || 300000);   // 5 min then proceed unanswered
+const randId = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
+
+async function emitQuestionEvent(chatId, mid, jwt, qid, questions) {
+  try {
+    await fetch(`${OWUI_BASE}/api/v1/chats/${chatId}/messages/${mid}/event`, {
+      method: "POST",
+      headers: { "Authorization": `Bearer ${jwt}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "agent:question", data: { id: qid, questions } }),
+    });
+  } catch (e) { console.error("[owui-claude] emit question failed:", e && e.message || e); }
+}
+
+// Per-turn canUseTool: guardrail always; interactive AskUserQuestion only when a browser is attached
+// (ctx.interactive with mid+jwt). Non-stream / fire-and-forget runs auto-allow (no one to ask).
+function makeCanUseTool(chatId, ctx) {
+  return async (tool, input) => {
+    if ((tool === "Bash" || tool === "Shell") && isDestructive(input)) {
+      return { behavior: "deny", message: "BLOCKED by system-safety guardrail: irreversible/system-destroying command is forbidden." };
+    }
+    if (tool === "AskUserQuestion" && ctx && ctx.interactive && ctx.mid && ctx.jwt && Array.isArray(input?.questions)) {
+      const qid = randId();
+      await emitQuestionEvent(chatId, ctx.mid, ctx.jwt, qid, input.questions);
+      ctx.onWait && ctx.onWait();
+      const answers = await new Promise((resolve) => {
+        const timer = setTimeout(() => { pendingQ.delete(qid); resolve(null); }, ANSWER_TIMEOUT);
+        pendingQ.set(qid, { resolve, timer });
+      });
+      ctx.onResume && ctx.onResume();
+      // proceed even if unanswered/timeout (empty answers) rather than hang the turn
+      return { behavior: "allow", updatedInput: { questions: input.questions, answers: answers || {} } };
+    }
+    return { behavior: "allow", updatedInput: input };
+  };
+}
 
 // ── message helpers ──
 function textOf(content) {
@@ -101,7 +136,7 @@ function reasoningCard(text) {
 }
 
 // ── the turn: yields {content}/{usage} ──
-async function* streamTurn(chatId, model, messages) {
+async function* streamTurn(chatId, model, messages, ctx = {}) {
   const um = lastUser(messages);
   if (!um) { yield { content: "_(no user message)_" }; return; }
   const sys = systemOf(messages);
@@ -109,7 +144,7 @@ async function* streamTurn(chatId, model, messages) {
   if (sys && typeof prompt === "string") prompt = sys + "\n\n" + prompt;   // persona instructions
   const conv = chatId ? "id:" + chatId : "h:" + textOf(um.content).slice(0, 40);
   const resume = cacheGet(conv);
-  const opts = { canUseTool, cwd: WORKSPACE, includePartialMessages: true, model: model || DEFAULT_MODEL };
+  const opts = { canUseTool: makeCanUseTool(chatId, ctx), cwd: WORKSPACE, includePartialMessages: true, model: model || DEFAULT_MODEL };
   // shared MCP tools (publish_artifact + notify) — same server all agents use; calls render as native cards.
   // strictMcpConfig: load ONLY this MCP server (ignore any host/project .mcp.json so the agent doesn't
   // pick up unrelated servers like claude-monitor via the /home/beastblaster mount).
@@ -287,6 +322,17 @@ const server = http.createServer((req, res) => {
     return sendJson(res, 200, { object: "list", data: MODELS.map(id => ({ id, object: "model", created: 0, owned_by: "claude" })) });
   }
   if (req.method === "GET" && url.includes("/health")) return sendJson(res, 200, { ok: true });
+  // E7: the fork's /api/agent/answer proxies the user's AskUserQuestion answer here → resolve the turn.
+  if (req.method === "POST" && url.includes("/answer")) {
+    let raw = ""; req.on("data", c => raw += c);
+    req.on("end", () => {
+      let b; try { b = JSON.parse(raw || "{}"); } catch { b = {}; }
+      const p = b.id && pendingQ.get(b.id);
+      if (p) { clearTimeout(p.timer); pendingQ.delete(b.id); p.resolve(b.answers || {}); return sendJson(res, 200, { ok: true }); }
+      return sendJson(res, 404, { ok: false, error: "no pending question" });
+    });
+    return;
+  }
   if (req.method !== "POST" || !url.includes("chat/completions")) return sendJson(res, 404, { error: "not found" });
 
   let raw = "";
@@ -309,8 +355,18 @@ const server = http.createServer((req, res) => {
 
     res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" });
     const send = (delta, finish = null) => res.write(`data: ${JSON.stringify({ id: cid, object: "chat.completion.chunk", created, model, choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`);
-    const gen = streamTurn(chatId, model, messages);
-    const mirror = new Mirror(chatId, req.headers["x-openwebui-message-id"], req.headers["x-openwebui-user-jwt"]);
+    const mid = req.headers["x-openwebui-message-id"];
+    const jwt = req.headers["x-openwebui-user-jwt"];
+    // E7: keep the SSE stream alive (comment pings) while an AskUserQuestion is awaiting the user's
+    // answer, so OWUI's upstream read doesn't time out during the pause.
+    let kaTimer = null;
+    const ctx = {
+      mid, jwt, interactive: true,
+      onWait: () => { if (!kaTimer) kaTimer = setInterval(() => { try { res.write(": keepalive\n\n"); } catch {} }, 15000); },
+      onResume: () => { if (kaTimer) { clearInterval(kaTimer); kaTimer = null; } },
+    };
+    const gen = streamTurn(chatId, model, messages, ctx);
+    const mirror = new Mirror(chatId, mid, jwt);
     if (mirror.on) ffWrite({ cid: chatId, mid: mirror.mid, jwt: mirror.jwt, model, messages, ts: Date.now() });
     let clientGone = false;
     // res "close" = the browser dropped (tab closed / Stop). If we're mirroring into
@@ -337,6 +393,7 @@ const server = http.createServer((req, res) => {
       await mirror.done(full);
       if (!clientGone) { send({}, "stop"); res.write("data: [DONE]\n\n"); }
     } catch { try { await mirror.done(full); } catch {} }
+    if (kaTimer) { clearInterval(kaTimer); kaTimer = null; }   // E7: stop any AskUserQuestion keepalive
     if (mirror.on) ffClear(chatId, mirror.mid);   // run finished → drop the durable record
     try { res.end(); } catch {}
   });

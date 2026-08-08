@@ -462,6 +462,14 @@ def stream_turn(chat_id, messages):
                     traceback.print_exc()
                     print(f"[owui-hermes] skipped bad frame: {fe!r}", flush=True)
                     continue
+
+            # FIX: flush buffered reasoning if the loop broke (idle/timeout/disconnect) before a
+            # visible event could flush it — otherwise the thinking block is silently lost.
+            if reasoning_open and reasoning_buf.strip():
+                yield {"content": '<details type="reasoning">\n<summary>Thinking</summary>\n'
+                                  + _fence(reasoning_buf.strip()) + '\n</details>\n\n'}
+                reasoning_buf = ""
+                reasoning_open = False
         finally:
             # #3 client aborted (OWUI Stop) or errored -> best-effort cancel the Hermes turn.
             if sid and not completed:

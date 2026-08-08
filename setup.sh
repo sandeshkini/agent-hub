@@ -38,7 +38,19 @@ if [ "$ROLE" = "hub" ]; then
   fi
 fi
 
-# 4) bring the stack up
+# 4) pre-create the external volumes + network so a FRESH machine doesn't fail on `external: true`
+#    (on aibo these already exist → reused, data preserved). Then bring the stack up.
+docker volume create open-webui >/dev/null 2>&1 || true
+docker volume create ollama >/dev/null 2>&1 || true
+docker network create apps >/dev/null 2>&1 || true
+# quick secret sanity (warn only)
+for k in WEBUI_SECRET_KEY ADAPTER_KEY; do
+  v="$(grep "^$k=" .env | cut -d= -f2-)"
+  case "$v" in ""|change-me*) echo "⚠️  $k is empty/placeholder in .env — set it before real use";; esac
+done
+if [ "$ROLE" = "node" ] && [ "${ADAPTER_BIND:-127.0.0.1}" = "127.0.0.1" ]; then
+  echo "⚠️  node role but ADAPTER_BIND=127.0.0.1 — the hub can't reach this node's adapters. Set ADAPTER_BIND=0.0.0.0."
+fi
 echo "-- docker compose up -d --build"
 docker compose up -d --build
 

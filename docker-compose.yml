@@ -30,6 +30,8 @@ services:
       NODE_HUB_TOKEN: "${NODE_HUB_TOKEN:-}"       # gates /api/nodes/register (empty = open, LAN only)
       OPENAI_API_BASE_URLS: "http://owui-hermes:9211/v1;http://owui-claude:9212/v1;http://owui-opencode:9213/v1"
       OPENAI_API_KEYS: "${ADAPTER_KEY};${ADAPTER_KEY};${ADAPTER_KEY}"
+      ADAPTER_KEY: "${ADAPTER_KEY}"                # E7: /api/agent/answer proxies to owui-claude with this
+      CLAUDE_ADAPTER_URL: "http://owui-claude:9212"
       ENABLE_FORWARD_USER_INFO_HEADERS: "true"   # forwards X-OpenWebUI-Chat-Id -> session continuity
       ENABLE_OLLAMA_API: "true"
       OLLAMA_BASE_URL: "http://ollama:11434"
@@ -166,8 +168,8 @@ services:
       - "127.0.0.1:8009:8000"
     environment:
       PORT: "8000"
-      ARTIFACTS_API: "http://artifacts:8080/api/publish"
-      PUBLIC_BASE: "https://apps.kingdomofluna.com"
+      ARTIFACTS_API: "${ARTIFACTS_API:-http://artifacts:8080/api/publish}"
+      PUBLIC_BASE: "${PUBLIC_BASE:-https://apps.kingdomofluna.com}"
       PUBLISH_TOKEN: "${PUBLISH_TOKEN}"
       NTFY_URL: "${NTFY_URL}"
       NTFY_TOPIC: "${NTFY_TOPIC}"

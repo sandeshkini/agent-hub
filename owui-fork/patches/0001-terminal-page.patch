@@ -1,25 +1,74 @@
 diff --git a/backend/open_webui/main.py b/backend/open_webui/main.py
-index 55613ac..8977f88 100644
+index 55613ac..749d08b 100644
 --- a/backend/open_webui/main.py
 +++ b/backend/open_webui/main.py
-@@ -138,6 +138,8 @@ from open_webui.models.models import Models
+@@ -138,6 +138,9 @@ from open_webui.models.models import Models
  from open_webui.models.users import Users
  from open_webui.routers import (
      analytics,
 +    agent_inbox,  # LOCAL PATCH (agent-hub fork): inbox summaries
 +    agent_nodes,  # LOCAL PATCH (agent-hub fork): multi-machine node registry (E4/E5)
++    agent_answer,  # LOCAL PATCH (agent-hub fork): AskUserQuestion answer relay (E7)
      audio,
      auths,
      automations,
-@@ -822,6 +824,8 @@ if ENABLE_ADMIN_ANALYTICS:
+@@ -822,6 +825,9 @@ if ENABLE_ADMIN_ANALYTICS:
  app.include_router(utils.router, prefix='/api/v1/utils', tags=['utils'])
  app.include_router(terminals.router, prefix='/api/v1/terminals', tags=['terminals'])
  app.include_router(automations.router, prefix='/api/v1/automations', tags=['automations'])
 +app.include_router(agent_inbox.router, prefix='/api/inbox', tags=['inbox'])  # LOCAL PATCH
 +app.include_router(agent_nodes.router, prefix='/api/nodes', tags=['nodes'])  # LOCAL PATCH
++app.include_router(agent_answer.router, prefix='/api/agent', tags=['agent'])  # LOCAL PATCH (E7)
  app.include_router(calendar.router, prefix='/api/v1/calendars', tags=['calendars'])
  
  # SCIM 2.0 API for identity management
+diff --git a/backend/open_webui/routers/agent_answer.py b/backend/open_webui/routers/agent_answer.py
+new file mode 100644
+index 0000000..ee17b5d
+--- /dev/null
++++ b/backend/open_webui/routers/agent_answer.py
+@@ -0,0 +1,41 @@
++# LOCAL PATCH (agent-hub fork, E7): relay an AskUserQuestion answer from the browser to the Claude
++# adapter. The browser can't reach owui-claude:9212 directly (it's on the internal compose network),
++# so it POSTs {id, answers} here and we forward to the adapter's /answer endpoint (Bearer ADAPTER_KEY),
++# which resolves the adapter's pending canUseTool promise so Claude continues with the user's choice.
++import os
++
++import aiohttp
++from fastapi import APIRouter, Depends, Request, HTTPException
++
++from open_webui.utils.auth import get_verified_user
++
++router = APIRouter()
++
++CLAUDE_ADAPTER_URL = os.environ.get("CLAUDE_ADAPTER_URL", "http://owui-claude:9212").rstrip("/")
++ADAPTER_KEY = os.environ.get("ADAPTER_KEY", "")
++
++
++@router.post("/answer")
++async def agent_answer(request: Request, user=Depends(get_verified_user)):
++    try:
++        body = await request.json()
++    except Exception:
++        raise HTTPException(status_code=400, detail="invalid json")
++    qid = body.get("id")
++    if not qid:
++        raise HTTPException(status_code=400, detail="id required")
++    headers = {"Content-Type": "application/json"}
++    if ADAPTER_KEY:
++        headers["Authorization"] = f"Bearer {ADAPTER_KEY}"
++    try:
++        async with aiohttp.ClientSession() as s:
++            async with s.post(
++                f"{CLAUDE_ADAPTER_URL}/answer",
++                json={"id": qid, "answers": body.get("answers") or {}},
++                headers=headers,
++                timeout=aiohttp.ClientTimeout(total=15),
++            ) as r:
++                ok = r.status == 200
++                return {"ok": ok, "status": r.status}
++    except Exception as e:
++        raise HTTPException(status_code=502, detail=f"adapter unreachable: {e}")
 diff --git a/backend/open_webui/routers/agent_inbox.py b/backend/open_webui/routers/agent_inbox.py
 new file mode 100644
 index 0000000..29024e9
@@ -304,11 +353,137 @@ index 0000000..eed014f
 +        raise HTTPException(status_code=403, detail="admin only")
 +    existed = _nodes.pop(node_id, None) is not None
 +    return {"deleted": existed}
+diff --git a/src/lib/components/chat/AgentQuestion.svelte b/src/lib/components/chat/AgentQuestion.svelte
+new file mode 100644
+index 0000000..cc84218
+--- /dev/null
++++ b/src/lib/components/chat/AgentQuestion.svelte
+@@ -0,0 +1,99 @@
++<script lang="ts">
++	// LOCAL PATCH (agent-hub fork, E7): renders a Claude AskUserQuestion as interactive option cards
++	// and POSTs the user's choice to /api/agent/answer (→ owui-claude /answer → resolves the turn).
++	import { getContext } from 'svelte';
++	import { WEBUI_API_BASE_URL } from '$lib/constants';
++	import { removeQuestion } from '$lib/utils/agentQuestions';
++
++	const i18n = getContext('i18n');
++
++	export let chatId: string;
++	export let item: { id: string; questions: any[] };
++
++	let submitting = false;
++	// selections[qIdx] = string (single) | string[] (multi)
++	let selections: Record<number, any> = {};
++
++	const qText = (q: any) => q?.question ?? q?.header ?? '';
++	const isMulti = (q: any) => !!q?.multiSelect;
++
++	const toggle = (qi: number, label: string, multi: boolean) => {
++		if (multi) {
++			const cur: string[] = Array.isArray(selections[qi]) ? selections[qi] : [];
++			selections[qi] = cur.includes(label) ? cur.filter((l) => l !== label) : [...cur, label];
++		} else {
++			selections[qi] = label;
++		}
++		selections = selections;
++	};
++	const isSel = (qi: number, label: string) => {
++		const v = selections[qi];
++		return Array.isArray(v) ? v.includes(label) : v === label;
++	};
++
++	const ready = () =>
++		(item.questions ?? []).every((_, qi) => {
++			const v = selections[qi];
++			return Array.isArray(v) ? v.length > 0 : !!v;
++		});
++
++	const submit = async () => {
++		if (submitting || !ready()) return;
++		submitting = true;
++		const answers: Record<string, any> = {};
++		(item.questions ?? []).forEach((q, qi) => {
++			answers[qText(q)] = selections[qi];
++		});
++		try {
++			await fetch(`${WEBUI_API_BASE_URL}/agent/answer`, {
++				method: 'POST',
++				headers: {
++					'Content-Type': 'application/json',
++					Authorization: `Bearer ${localStorage.getItem('token') ?? ''}`
++				},
++				body: JSON.stringify({ id: item.id, answers })
++			});
++		} catch (e) {}
++		removeQuestion(chatId, item.id);
++	};
++</script>
++
++<div class="my-2 rounded-2xl border border-gray-100 dark:border-gray-800 bg-gray-50 dark:bg-gray-900 p-3">
++	<div class="text-xs font-medium text-gray-500 mb-2 flex items-center gap-1.5">
++		<span class="size-1.5 rounded-full bg-blue-500 animate-pulse"></span>
++		{$i18n.t('The agent needs your input')}
++	</div>
++
++	{#each item.questions ?? [] as q, qi}
++		<div class="mb-3 last:mb-0">
++			{#if q?.header}<div class="text-[11px] uppercase tracking-wide text-gray-400 mb-0.5">{q.header}</div>{/if}
++			<div class="text-sm font-medium mb-1.5">{qText(q)}</div>
++			<div class="flex flex-col gap-1.5">
++				{#each q?.options ?? [] as opt}
++					<button
++						type="button"
++						class="text-left px-3 py-2 rounded-xl border text-sm transition
++							{isSel(qi, opt.label)
++								? 'border-blue-500 bg-blue-50 dark:bg-blue-950/40'
++								: 'border-gray-200 dark:border-gray-800 hover:bg-gray-100 dark:hover:bg-gray-850'}"
++						on:click={() => toggle(qi, opt.label, isMulti(q))}
++					>
++						<div class="font-medium">{opt.label}</div>
++						{#if opt.description}<div class="text-xs text-gray-500 mt-0.5">{opt.description}</div>{/if}
++					</button>
++				{/each}
++			</div>
++		</div>
++	{/each}
++
++	<div class="flex justify-end mt-2">
++		<button
++			type="button"
++			class="px-3 py-1.5 rounded-xl text-sm font-medium bg-black text-white dark:bg-white dark:text-black disabled:opacity-40 transition"
++			disabled={submitting || !ready()}
++			on:click={submit}
++		>
++			{submitting ? $i18n.t('Sending...') : $i18n.t('Submit')}
++		</button>
++	</div>
++</div>
 diff --git a/src/lib/components/chat/Chat.svelte b/src/lib/components/chat/Chat.svelte
-index 87a4029..29bd058 100644
+index 87a4029..575e689 100644
 --- a/src/lib/components/chat/Chat.svelte
 +++ b/src/lib/components/chat/Chat.svelte
-@@ -1133,6 +1133,7 @@
+@@ -102,6 +102,8 @@
+ 
+ 	import Banner from '../common/Banner.svelte';
+ 	import MessageInput from '$lib/components/chat/MessageInput.svelte';
++	import AgentQuestion from '$lib/components/chat/AgentQuestion.svelte'; // LOCAL PATCH (E7)
++	import { agentQuestions, addQuestion } from '$lib/utils/agentQuestions'; // LOCAL PATCH (E7)
+ 	import Messages from '$lib/components/chat/Messages.svelte';
+ 	import Navbar from '$lib/components/chat/Navbar.svelte';
+ 	import ChatControls from './ChatControls.svelte';
+@@ -1126,6 +1128,11 @@
+ 					eventConfirmationInputValue = data?.value ?? '';
+ 					eventConfirmationInputType = data?.input?.type ?? data?.type ?? '';
+ 					eventConfirmationInputOptions = data?.input?.options ?? data?.options ?? [];
++				} else if (type === 'agent:question') {
++					// LOCAL PATCH (E7): Claude AskUserQuestion → render interactive option cards.
++					if (data?.id && Array.isArray(data?.questions)) {
++						addQuestion(event.chat_id ?? $chatId, { id: data.id, questions: data.questions });
++					}
+ 				} else if (type.startsWith('terminal:')) {
+ 					terminalEventHandler(type, data);
+ 				} else {
+@@ -1133,6 +1140,7 @@
  				}
  
  				history.messages[event.message_id] = message;
@@ -316,7 +491,7 @@ index 87a4029..29bd058 100644
  			}
  		} else {
  			// Non-active chat completion: queue stays in the global store.
-@@ -1939,6 +1940,43 @@
+@@ -1939,6 +1947,43 @@
  		setTimeout(() => chatInput?.focus(), 0);
  	};
  
@@ -360,7 +535,7 @@ index 87a4029..29bd058 100644
  	const loadChat = async () => {
  		noteChatDebug('loadChat start');
  		// chatIdProp is empty for chats started from the home page (URL set via replaceState)
-@@ -2019,6 +2057,9 @@
+@@ -2019,6 +2064,9 @@
  				// nodes from failed regenerations (#24424, #24157, #20474)
  				sanitizeHistory(history);
  
@@ -370,7 +545,7 @@ index 87a4029..29bd058 100644
  				chatTitle.set(chatContent.title);
  
  				params = structuredClone(chatContent?.params ?? {});
-@@ -3138,7 +3179,12 @@
+@@ -3138,7 +3186,12 @@
  				filter_ids: selectedFilterIds.length > 0 ? selectedFilterIds : undefined,
  				tool_ids: toolIds.length > 0 ? toolIds : undefined,
  				skill_ids: skillIds.length > 0 ? skillIds : undefined,
@@ -384,6 +559,21 @@ index 87a4029..29bd058 100644
  				tool_servers: [
  					...($toolServers ?? []).filter(
  						(server, idx) => toolServerIds.includes(idx) || toolServerIds.includes(server?.id)
+@@ -3946,6 +3999,14 @@
+ 									</div>
+ 								</div>
+ 							{:else}
++								<!-- LOCAL PATCH (E7): interactive AskUserQuestion cards above the input -->
++								{#if ($agentQuestions[$chatId] ?? []).length}
++									<div class="w-full max-w-5xl mx-auto px-2.5">
++										{#each $agentQuestions[$chatId] as q (q.id)}
++											<AgentQuestion chatId={$chatId} item={q} />
++										{/each}
++									</div>
++								{/if}
+ 								<div
+ 									id={embedded ? messageInputDropzoneId : undefined}
+ 									class=" pb-2 {dragged ? 'z-0' : 'z-10'}"
 diff --git a/src/lib/components/chat/MessageInput.svelte b/src/lib/components/chat/MessageInput.svelte
 index 883bdba..32be20f 100644
 --- a/src/lib/components/chat/MessageInput.svelte
@@ -766,6 +956,33 @@ index 0000000..a7743f8
 +		clearInterval(timer);
 +	};
 +});
+diff --git a/src/lib/utils/agentQuestions.ts b/src/lib/utils/agentQuestions.ts
+new file mode 100644
+index 0000000..b5b9113
+--- /dev/null
++++ b/src/lib/utils/agentQuestions.ts
+@@ -0,0 +1,21 @@
++// LOCAL PATCH (agent-hub fork, E7): pending AskUserQuestion prompts, keyed by chat id.
++// The Claude adapter emits an `agent:question` socket event; Chat.svelte pushes it here; an
++// AgentQuestion card renders the options and POSTs the answer back to /api/agent/answer.
++import { writable } from 'svelte/store';
++
++export type AgentQuestion = { id: string; questions: any[] };
++
++export const agentQuestions = writable<Record<string, AgentQuestion[]>>({});
++
++export function addQuestion(chatId: string, q: AgentQuestion) {
++	if (!chatId || !q?.id) return;
++	agentQuestions.update((m) => {
++		const list = m[chatId] ?? [];
++		if (list.some((x) => x.id === q.id)) return m; // dedupe
++		return { ...m, [chatId]: [...list, q] };
++	});
++}
++
++export function removeQuestion(chatId: string, id: string) {
++	agentQuestions.update((m) => ({ ...m, [chatId]: (m[chatId] ?? []).filter((x) => x.id !== id) }));
++}
 diff --git a/src/lib/utils/agentTerminals.ts b/src/lib/utils/agentTerminals.ts
 new file mode 100644
 index 0000000..df40d44

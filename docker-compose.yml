@@ -154,6 +154,24 @@ services:
     depends_on:
       - opencode
 
+  # E10.6 — node front-door: ONE address for this worker's agents + terminal, so the hub reaches
+  # everything via a single Pangolin resource (register.mb) instead of one hostname per port.
+  # Routes /claude→owui-claude, /opencode→owui-opencode, /term→host owui-terminal. Node role only.
+  node-frontdoor:
+    image: caddy:2-alpine
+    container_name: agent-hub-frontdoor
+    profiles: ["node"]
+    restart: unless-stopped
+    ports:
+      - "${FRONTDOOR_BIND:-127.0.0.1}:${FRONTDOOR_PORT:-8088}:8088"
+    volumes:
+      - ./node/frontdoor/Caddyfile:/etc/caddy/Caddyfile:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # reach the host's owui-terminal (:7681) on Linux nodes
+    depends_on:
+      - owui-claude
+      - owui-opencode
+
   ollama:
     image: ollama/ollama
     container_name: ollama

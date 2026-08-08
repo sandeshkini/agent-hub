@@ -1,0 +1,32 @@
+# agent-hub node front-door (E10.6)
+# ONE address for a worker machine's agents + terminal, so the hub reaches everything on this node via a
+# single Pangolin resource (register.mb) instead of one hostname per port. TLS is terminated upstream at
+# Pangolin/Traefik, so this is plain HTTP on :8088. Bearer auth is enforced by the backends themselves
+# (ADAPTER_KEY on the adapters, TERMINAL_TOKEN on the terminal) — the front-door just routes + strips the
+# path prefix. Add a new agent = add one handle_path block here; no new hostname/DNS needed.
+{
+	admin off
+	auto_https off
+}
+
+:8088 {
+	# Claude adapter → /claude/v1/...  (OWUI connection base: https://register.mb.<domain>/claude/v1)
+	handle_path /claude/* {
+		reverse_proxy owui-claude:9212
+	}
+	# OpenCode adapter → /opencode/v1/...
+	handle_path /opencode/* {
+		reverse_proxy owui-opencode:9213
+	}
+	# Terminal (owui-terminal runs on the host) → /term/api/terminals/{id} (WebSocket)
+	handle_path /term/* {
+		reverse_proxy host.docker.internal:7681
+	}
+	# Health probe for the hub's node-pin heartbeat.
+	handle /health {
+		respond "ok" 200
+	}
+	handle {
+		respond "agent-hub node front-door" 404
+	}
+}

@@ -24,7 +24,7 @@ from mcp.server.fastmcp import FastMCP
 
 ARTIFACTS_API = os.getenv("ARTIFACTS_API", "http://artifacts:8080/api/publish")
 PUBLISH_TOKEN = os.getenv("PUBLISH_TOKEN", "")
-PUBLIC_BASE = os.getenv("PUBLIC_BASE", "https://apps.kingdomofluna.com")
+PUBLIC_BASE = os.getenv("PUBLIC_BASE", "http://localhost:8080")
 NTFY_BASE = os.getenv("NTFY_URL", "http://ntfy").rstrip("/")
 NTFY_TOPIC = os.getenv("NTFY_TOPIC", "aibo")
 NTFY_TOKEN = os.getenv("NTFY_TOKEN", "")
@@ -35,7 +35,7 @@ mcp = FastMCP("agent-tools", host="0.0.0.0", port=int(os.getenv("PORT", "8000"))
 @mcp.tool()
 def publish_artifact(title: str, content_markdown: str) -> str:
     """Publish a markdown summary as a shareable web page on the artifacts board
-    (apps.kingdomofluna.com/artifacts). Use this to SHOW the user something visual — a report,
+    (the artifacts board, at $PUBLIC_BASE/artifacts). Use this to SHOW the user something visual — a report,
     a summary, results. A phone notification is sent automatically. Returns the page URL.
 
     :param title: Short title for the page.

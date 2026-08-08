@@ -9,8 +9,13 @@ Scope: intentionally narrow — only clearly irreversible / system-destroying
 operations are blocked, so normal work (rm -rf ./build, etc.) is unaffected.
 """
 import json
+import os
 import re
 import sys
+
+# Protect the running user's home dir generically (not a hardcoded username).
+# Override the protected root with PROTECT_HOME if you need a different path.
+_HOME = os.environ.get("PROTECT_HOME") or os.path.expanduser("~")
 
 
 def _gather_command_text(payload: dict) -> str:
@@ -65,8 +70,8 @@ DENY = [
     r"\bchown\b[^\n]*-[a-z]*R[a-z]*[^\n]*\s(/|/home|/etc|/usr)(\s|$)",
     # mass move of the filesystem/home
     r"\bmv\b\s+(/\*|~|/home/\S+)\s+/dev/null",
-    # overwrite whole home/hermes state
-    r"\brm\b[^\n]*-[a-z]*r[a-z]*\b[^\n]*/home/beastblaster(\s|/\*|$)",
+    # overwrite whole home/hermes state (home dir is resolved at runtime, not hardcoded)
+    rf"\brm\b[^\n]*-[a-z]*r[a-z]*\b[^\n]*{re.escape(_HOME)}(\s|/\*|$)",
     r"\brm\b[^\n]*-[a-z]*r[a-z]*\b[^\n]*\.hermes(\s|/\*|$)",
 ]
 _COMPILED = [re.compile(p, re.IGNORECASE) for p in DENY]

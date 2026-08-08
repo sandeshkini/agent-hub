@@ -38,7 +38,7 @@ const DENY = [
   /\b(parted|fdisk|sfdisk|gdisk|sgdisk)\b[^\n]*\/dev\//i,
   /\b(shutdown|reboot|poweroff|halt)\b/i, /\binit\s+[06]\b/i, /\bsystemctl\b\s+(poweroff|reboot|halt|suspend)/i,
   /:\s*\(\s*\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:/,
-  /\brm\b[^\n]*-[a-z]*r[a-z]*\b[^\n]*\/home\/beastblaster(\s|\/\*|$)/i,
+  new RegExp(`\\brm\\b[^\\n]*-[a-z]*r[a-z]*\\b[^\\n]*${homedir().replace(/[.*+?^${}()|[\]\\\\]/g, "\\\\$&")}(\\s|/\\*|$)`, "i"),  // protect the running user\x27s home dir (parameterized, not a hardcoded username)
   /\brm\b[^\n]*-[a-z]*r[a-z]*\b[^\n]*\.hermes(\s|\/\*|$)/i,
 ];
 function isDestructive(input) {
@@ -150,7 +150,7 @@ async function* streamTurn(chatId, model, messages, ctx = {}) {
   const opts = { canUseTool: makeCanUseTool(chatId, ctx), cwd: WORKSPACE, includePartialMessages: true, model: model || DEFAULT_MODEL };
   // shared MCP tools (publish_artifact + notify) — same server all agents use; calls render as native cards.
   // strictMcpConfig: load ONLY this MCP server (ignore any host/project .mcp.json so the agent doesn't
-  // pick up unrelated servers like claude-monitor via the /home/beastblaster mount).
+  // pick up unrelated servers via the workspace mount).
   {
     // Standard MCP wiring. Each MCP_SERVERS entry is a STANDARD MCP server config carrying a `name`:
     //   HTTP/SSE:  {"name":"linear","type":"http","url":"https://mcp.linear.app/mcp","headers":{...}}

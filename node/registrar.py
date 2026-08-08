@@ -9,7 +9,7 @@ Portable: Python 3 stdlib only (works on macOS/Linux). Config via env or a node.
 
 Connectivity model (same-LAN or Tailscale):
   - The browser only ever talks to OWUI. Nodes just need to be reachable FROM the OWUI backend.
-  - HUB_REGISTER_URL points at OWUI's SSO-free LAN address (e.g. http://192.168.0.146:3000/api/nodes/register).
+  - HUB_REGISTER_URL points at OWUI's SSO-free LAN address (e.g. http://<hub-lan-ip>:3000/api/nodes/register).
   - NODE_API_URL / TERMINAL_URL are THIS machine's LAN URLs that the OWUI backend will call.
 Give this machine a static/reserved LAN IP so those URLs don't drift.
 """

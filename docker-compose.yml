@@ -100,7 +100,7 @@ services:
       - "${ADAPTER_BIND:-127.0.0.1}:9212:9212"
     user: "${DOCKER_USER:-1000:1000}"
     volumes:
-      - ${WORKSPACE_HOST:-/home/beastblaster}:${WORKSPACE:-/home/beastblaster}
+      - ${WORKSPACE_HOST:-${HOME}}:${WORKSPACE:-${HOME}}
       - ./ff-state:/ffstate
     environment:
       CLAUDE_CODE_OAUTH_TOKEN: "${CLAUDE_CODE_OAUTH_TOKEN}"
@@ -110,7 +110,7 @@ services:
       CLAUDE_MODELS: "${CLAUDE_MODELS}"
       CLAUDE_MODEL: "${CLAUDE_MODEL}"
       MCP_SERVERS: "${MCP_SERVERS:-[]}"           # external MCP hub: one place -> all adapters
-      WORKSPACE: "${WORKSPACE:-/home/beastblaster}"
+      WORKSPACE: "${WORKSPACE:-${HOME}}"
       HOME: "/home/node"
 
   opencode:
@@ -122,9 +122,9 @@ services:
     expose:
       - "4096"
     user: "${DOCKER_USER:-1000:1000}"
-    working_dir: ${WORKSPACE:-/home/beastblaster}
+    working_dir: ${WORKSPACE:-${HOME}}
     volumes:
-      - ${WORKSPACE_HOST:-/home/beastblaster}:${WORKSPACE:-/home/beastblaster}
+      - ${WORKSPACE_HOST:-${HOME}}:${WORKSPACE:-${HOME}}
     environment:
       OPENCODE_API_KEY: "${OPENCODE_API_KEY}"
       MCP_SERVERS: "${MCP_SERVERS:-[]}"           # external MCP hub: one place -> all adapters
@@ -171,7 +171,7 @@ services:
     environment:
       PORT: "8000"
       ARTIFACTS_API: "${ARTIFACTS_API:-http://artifacts:8080/api/publish}"
-      PUBLIC_BASE: "${PUBLIC_BASE:-https://apps.kingdomofluna.com}"
+      PUBLIC_BASE: "${PUBLIC_BASE:-http://localhost:8080}"
       PUBLISH_TOKEN: "${PUBLISH_TOKEN}"
       NTFY_URL: "${NTFY_URL}"
       NTFY_TOPIC: "${NTFY_TOPIC}"

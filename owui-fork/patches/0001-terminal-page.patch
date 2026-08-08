@@ -73,10 +73,10 @@ index 0000000..ee17b5d
 +        raise HTTPException(status_code=502, detail=f"adapter unreachable: {e}")
 diff --git a/backend/open_webui/routers/agent_inbox.py b/backend/open_webui/routers/agent_inbox.py
 new file mode 100644
-index 0000000..759747b
+index 0000000..b956500
 --- /dev/null
 +++ b/backend/open_webui/routers/agent_inbox.py
-@@ -0,0 +1,162 @@
+@@ -0,0 +1,165 @@
 +# LOCAL PATCH (agent-hub fork): E2 Inbox with real-time smart summaries.
 +# Returns the user's chat list (same snippet/active/unread data as OWUI's list) with a one-line
 +# LLM summary attached per chat. Summaries are cached and regenerated ONLY when a chat changes
@@ -130,9 +130,10 @@ index 0000000..759747b
 +
 +
 +_SUMMARY_INSTRUCTION = (
-+    "In 4 to 8 words, write a concise title describing what this conversation is about. "
-+    "Output ONLY the title — no quotes, no trailing period, no preamble."
++    "Write a concise summary of what this conversation is about, in at most 140 characters "
++    "(one line, may be a phrase or short sentence). Output ONLY the summary — no quotes, no preamble."
 +)
++SUMMARY_MAX_CHARS = int(os.environ.get("SUMMARY_MAX_CHARS", "140"))
 +
 +
 +def _clean_title(out: str) -> str:
@@ -141,7 +142,9 @@ index 0000000..759747b
 +    lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
 +    if lines:
 +        out = lines[-1].strip().strip('"').strip()
-+    return out[:90]
++    if len(out) > SUMMARY_MAX_CHARS:
++        out = out[:SUMMARY_MAX_CHARS].rstrip() + "…"
++    return out
 +
 +
 +async def _summary_via_openai(text: str):
@@ -176,7 +179,7 @@ index 0000000..759747b
 +        async with s.post(
 +            f"{OLLAMA_BASE_URL}/api/generate",
 +            json={"model": SUMMARY_MODEL, "prompt": prompt, "stream": False,
-+                  "options": {"num_predict": 24, "temperature": 0.2}},
++                  "options": {"num_predict": 60, "temperature": 0.2}},
 +            timeout=aiohttp.ClientTimeout(total=45),
 +        ) as r:
 +            d = await r.json()

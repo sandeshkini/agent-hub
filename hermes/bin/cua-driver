@@ -128,7 +128,14 @@ def do_mcp(argv):
     def is_expired(line):
         try:
             low = line.lower()
-            if b"session" not in low or not any(k in low for k in (b"expired", b"revoked", b"no active session", b"not found")):
+            # a session-related failure in ANY of the phrasings the daemon uses after a restart:
+            # "session expired/revoked/not found/invalid/unknown/closed/not valid", "this session …",
+            # "no active session", "stale". Broad on purpose — heal is idempotent + fail-open.
+            if b"session" not in low:
+                return False
+            if not any(k in low for k in (b"expired", b"revoked", b"no active session", b"not found",
+                                          b"invalid", b"unknown", b"closed", b"does not exist",
+                                          b"this session", b"stale", b"not valid", b"failed")):
                 return False
             m = json.loads(line)
             return isinstance(m, dict) and ("id" in m)   # a JSON-RPC RESPONSE, not a log/notification

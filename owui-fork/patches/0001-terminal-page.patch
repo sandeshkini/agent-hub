@@ -1843,7 +1843,7 @@ index 0000000..cfed3cc
 +</div>
 diff --git a/src/routes/(app)/terminal/+page.svelte b/src/routes/(app)/terminal/+page.svelte
 new file mode 100644
-index 0000000..6065425
+index 0000000..24309c0
 --- /dev/null
 +++ b/src/routes/(app)/terminal/+page.svelte
 @@ -0,0 +1,201 @@
@@ -1914,7 +1914,7 @@ index 0000000..6065425
 +		{ label: '^C', seq: '\x03' },
 +		{ label: '^D', seq: '\x04' },
 +		{ label: '^Z', seq: '\x1a' },
-+		{ label: '^L', seq: '\x0c' },
++		{ label: '^A', seq: '\x01' },
 +		{ label: '←', seq: '\x1b[D' },
 +		{ label: '↑', seq: '\x1b[A' },
 +		{ label: '↓', seq: '\x1b[B' },

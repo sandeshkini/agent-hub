@@ -36,6 +36,10 @@ services:
       OPENAI_API_BASE_URLS: "http://owui-hermes:9211/v1;http://owui-claude:9212/v1;http://owui-opencode:9213/v1${MB_OPENAI_URLS:-}"
       OPENAI_API_KEYS: "${ADAPTER_KEY};${ADAPTER_KEY};${ADAPTER_KEY}${MB_OPENAI_KEYS:-}"
       OPENAI_API_CONFIGS: "${MB_OPENAI_CONFIGS:-{}}"   # per-connection cfg (prefix_id for remote nodes → mb.*)
+      # RESILIENCE (E10.7): remote nodes (MacBook) are laptops that sleep. Bound the per-connection
+      # model-list fetch so an OFFLINE node fails fast (5s) instead of hanging the whole model load and
+      # 500-ing the hub page. Local adapters answer in <100ms; only a dead remote hits this cap.
+      AIOHTTP_CLIENT_TIMEOUT_MODEL_LIST: "5"
       ADAPTER_KEY: "${ADAPTER_KEY}"                # E7: /api/agent/answer proxies to owui-claude with this
       CLAUDE_ADAPTER_URL: "http://owui-claude:9212"
       ENABLE_FORWARD_USER_INFO_HEADERS: "true"   # forwards X-OpenWebUI-Chat-Id -> session continuity

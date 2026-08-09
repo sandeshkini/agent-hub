@@ -1162,7 +1162,7 @@ index ce1eda9..04a7ab9 100644
  	<div bind:this={terminalEl} class="absolute inset-0 px-0.5" class:pointer-events-none={overlay} />
  </div>
 diff --git a/src/lib/components/layout/Sidebar.svelte b/src/lib/components/layout/Sidebar.svelte
-index f8ac62b..e839ddd 100644
+index f8ac62b..e6f9008 100644
 --- a/src/lib/components/layout/Sidebar.svelte
 +++ b/src/lib/components/layout/Sidebar.svelte
 @@ -74,6 +74,7 @@
@@ -1213,9 +1213,15 @@ index f8ac62b..e839ddd 100644
  
  	let scrollTop = 0;
  
-@@ -146,6 +171,10 @@
+@@ -145,7 +170,16 @@
+ 
  	let sharedFolders: any[] = [];
  
++	// LOCAL PATCH (E11 concept C fix): must be declared — line 177 assigns it inside a reactive STATEMENT
++	// (with $config/$user deps), which Svelte does NOT auto-declare. Without this it's undefined at first
++	// paint and `{#each barItems}` throws → white screen.
++	let barItems: string[] = [];
++
  	$: pinnedItems = $settings?.pinnedMenuItems ?? DEFAULT_PINNED_ITEMS;
 +	// LOCAL PATCH (E11 concept C): labeled rows = pinned items minus the ones in the bottom bar.
 +	$: navItems = pinnedItems.filter((id) => !BAR_MENU_ITEMS.includes(id));
@@ -1224,7 +1230,7 @@ index f8ac62b..e839ddd 100644
  
  	const isMenuItemVisible = (id) => {
  		switch (id) {
-@@ -175,6 +204,9 @@
+@@ -175,6 +209,9 @@
  				);
  			case 'playground':
  				return $user?.role === 'admin';
@@ -1234,7 +1240,7 @@ index f8ac62b..e839ddd 100644
  			default:
  				return false;
  		}
-@@ -182,8 +214,10 @@
+@@ -182,8 +219,10 @@
  
  	const getMenuItemMeta = (id) => {
  		const items = {
@@ -1245,7 +1251,7 @@ index f8ac62b..e839ddd 100644
  			automations: { label: 'Automations', href: '/automations', iconType: 'automations' },
  			calendar: { label: 'Calendar', href: '/calendar', iconType: 'calendar' },
  			playground: { label: 'Playground', href: '/playground', iconType: 'playground' }
-@@ -193,6 +227,8 @@
+@@ -193,6 +232,8 @@
  
  	const menuItemPathPrefixes = {
  		notes: '/notes',
@@ -1254,7 +1260,7 @@ index f8ac62b..e839ddd 100644
  		workspace: '/workspace',
  		calendar: '/calendar',
  		automations: '/automations',
-@@ -1014,6 +1050,7 @@
+@@ -1014,6 +1055,7 @@
  					</Tooltip>
  				</div>
  
@@ -1262,7 +1268,7 @@ index f8ac62b..e839ddd 100644
  				{#each pinnedItems as itemId (itemId)}
  					{@const meta = getMenuItemMeta(itemId)}
  					{#if meta && isMenuItemVisible(itemId)}
-@@ -1049,6 +1086,10 @@
+@@ -1049,6 +1091,10 @@
  											<CalendarIcon className="size-4" strokeWidth="1.5" />
  										{:else if itemId === 'playground'}
  											<CodeIcon className="size-4" strokeWidth="1.5" />
@@ -1273,7 +1279,7 @@ index f8ac62b..e839ddd 100644
  										{/if}
  									</div>
  								</a>
-@@ -1184,6 +1225,9 @@
+@@ -1184,6 +1230,9 @@
  					}
  				}}
  			>
@@ -1283,7 +1289,7 @@ index f8ac62b..e839ddd 100644
  				<div class="pb-1">
  					<div class="px-1 flex justify-center text-gray-700 dark:text-gray-300">
  						<a
-@@ -1206,29 +1250,10 @@
+@@ -1206,29 +1255,10 @@
  						</a>
  					</div>
  
@@ -1316,7 +1322,7 @@ index f8ac62b..e839ddd 100644
  							{@const meta = getMenuItemMeta(itemId)}
  							{#if meta && isMenuItemVisible(itemId)}
  								<div
-@@ -1259,6 +1284,10 @@
+@@ -1259,6 +1289,10 @@
  												<CalendarIcon className="size-4" strokeWidth="1.5" />
  											{:else if itemId === 'playground'}
  												<CodeIcon className="size-4" strokeWidth="1.5" />
@@ -1327,7 +1333,7 @@ index f8ac62b..e839ddd 100644
  											{/if}
  										</div>
  
-@@ -1272,6 +1301,9 @@
+@@ -1272,6 +1306,9 @@
  					</div>
  				</div>
  
@@ -1337,7 +1343,7 @@ index f8ac62b..e839ddd 100644
  				{#if ($models ?? []).length > 0 && (($settings?.pinnedModels ?? []).length > 0 || $config?.default_pinned_models)}
  					<SidebarSection
  						id="sidebar-models"
-@@ -1303,7 +1335,8 @@
+@@ -1303,7 +1340,8 @@
  					</SidebarSection>
  				{/if}
  
@@ -1347,7 +1353,7 @@ index f8ac62b..e839ddd 100644
  					<SidebarSection
  						id="sidebar-channels"
  						bind:open={showChannels}
-@@ -1337,7 +1370,8 @@
+@@ -1337,7 +1375,8 @@
  					</SidebarSection>
  				{/if}
  
@@ -1357,7 +1363,7 @@ index f8ac62b..e839ddd 100644
  					<SidebarSection
  						id="sidebar-folders"
  						bind:open={showFolders}
-@@ -1391,6 +1425,31 @@
+@@ -1391,6 +1430,31 @@
  					</SidebarSection>
  				{/if}
  
@@ -1389,7 +1395,7 @@ index f8ac62b..e839ddd 100644
  				<SidebarSection
  					id="sidebar-chats"
  					className="mt-0.5"
-@@ -1586,13 +1645,13 @@
+@@ -1586,13 +1650,13 @@
  					<div class=" flex-1 flex flex-col overflow-y-auto scrollbar-hidden">
  						<div class="pt-1.5">
  							{#if $chats}
@@ -1407,7 +1413,7 @@ index f8ac62b..e839ddd 100644
  										>
  											{$i18n.t(chat.time_range)}
  											<!-- localisation keys for time_range to be recognized from the i18next parser (so they don't get automatically removed):
-@@ -1624,6 +1683,8 @@
+@@ -1624,6 +1688,8 @@
  										updatedAt={chat.updated_at}
  										lastReadAt={chat.last_read_at}
  										active={chat.active ?? false}
@@ -1416,7 +1422,7 @@ index f8ac62b..e839ddd 100644
  										{shiftKey}
  										selected={selectedChatId === chat.id}
  										on:select={() => {
-@@ -1676,7 +1737,58 @@
+@@ -1676,7 +1742,58 @@
  				<div
  					class=" sidebar-bg-gradient-to-t bg-linear-to-t from-gray-50 dark:from-gray-950 to-transparent from-50% pointer-events-none absolute inset-0 -z-10 -mt-6"
  				></div>
@@ -1476,7 +1482,7 @@ index f8ac62b..e839ddd 100644
  					{#if $user !== undefined && $user !== null}
  						<UserMenu
  							role={$user?.role}
-@@ -1685,10 +1797,11 @@
+@@ -1685,10 +1802,11 @@
  						>
  							<button
  								type="button"
@@ -1490,7 +1496,7 @@ index f8ac62b..e839ddd 100644
  									<img
  										src={`${WEBUI_API_BASE_URL}/users/${$user?.id}/profile/image`}
  										class="size-5.5 object-cover rounded-full"
-@@ -1708,7 +1821,6 @@
+@@ -1708,7 +1826,6 @@
  										</div>
  									{/if}
  								</div>

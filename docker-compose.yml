@@ -108,6 +108,10 @@ services:
     container_name: owui-claude
     profiles: ["hub", "node"]                      # runs on both hub and worker nodes
     restart: unless-stopped
+    # Share the host PID namespace so the agent can actually SEE the host for a real health check
+    # (host processes, not just its own 5). Pairs with the docker socket below; set AGENT_PID_HOST= blank
+    # in .env to opt out. (systemctl still needs host execution — a container can't drive host systemd.)
+    pid: "${AGENT_PID_HOST:-host}"
     ports:
       - "${ADAPTER_BIND:-127.0.0.1}:9212:9212"
     user: "${DOCKER_USER:-1000:1000}"

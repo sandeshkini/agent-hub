@@ -100,6 +100,24 @@ function textOf(content) {
   return "";
 }
 function lastUser(messages) { for (let i = messages.length - 1; i >= 0; i--) if (messages[i].role === "user") return messages[i]; return null; }
+// Compact transcript of prior turns (everything EXCEPT the current/last user message), with our
+// tool-card/reasoning HTML stripped and each turn capped — used to re-prime context when the resumable
+// in-memory SDK session is gone (container restart / LRU eviction) so a follow-up doesn't lose history.
+function transcriptOf(messages) {
+  let lastUserIdx = -1;
+  for (let i = messages.length - 1; i >= 0; i--) if (messages[i].role === "user") { lastUserIdx = i; break; }
+  const out = [];
+  for (let i = 0; i < messages.length; i++) {
+    if (i === lastUserIdx) continue;
+    const m = messages[i];
+    if (!m || (m.role !== "user" && m.role !== "assistant")) continue;
+    let t = textOf(m.content).replace(/<details[\s\S]*?<\/details>/g, "").replace(/\n{3,}/g, "\n\n").trim();
+    if (!t) continue;
+    if (t.length > 2000) t = t.slice(0, 2000) + " …";
+    out.push((m.role === "user" ? "User: " : "Assistant: ") + t);
+  }
+  return out.join("\n\n");
+}
 // Persona/system prompt (OWUI Models send a system message) — forward it to the agent.
 function systemOf(messages) { return (messages || []).filter(m => m && m.role === "system").map(m => textOf(m.content)).filter(Boolean).join("\n\n"); }
 function chatIdFrom(req, body) {
@@ -149,13 +167,22 @@ async function* streamTurn(chatId, model, messages, ctx = {}) {
   const um = lastUser(messages);
   if (!um) { yield { content: "_(no user message)_" }; return; }
   const sys = systemOf(messages);
-  let prompt = buildPrompt(um);
-  if (sys && typeof prompt === "string") prompt = sys + "\n\n" + prompt;   // persona instructions
   // Resume ONLY when we have a stable chat id. The old content-prefix fallback ("h:"+first-40-chars)
   // collided across unrelated conversations that shared an opening phrase → one chat could resume
   // another's Claude session (cross-conversation context leak). No chat id ⇒ fresh session, no resume.
   const conv = chatId ? "id:" + chatId : null;
   const resume = conv ? cacheGet(conv) : undefined;
+  let prompt = buildPrompt(um);
+  // CONTEXT CONTINUITY: within one container lifetime we resume the SDK session (full context, cheap).
+  // But that cache is IN-MEMORY, so a container restart (every deploy) or an LRU eviction drops it — and
+  // we were sending ONLY the last user message, so Claude saw "the start of our conversation" and lost
+  // all history (e.g. pinged hours later after a redeploy). With no resume, replay the prior turns so
+  // context survives a restart. (Efficient resume path is unchanged when the session is still cached.)
+  if (!resume && typeof prompt === "string") {
+    const prior = transcriptOf(messages);
+    if (prior) prompt = `[Continuing an earlier conversation — the context so far:\n\n${prior}\n\nThe user now says:]\n\n${prompt}`;
+  }
+  if (sys && typeof prompt === "string") prompt = sys + "\n\n" + prompt;   // persona instructions
   // Permissions are gated by canUseTool below — it IS the SDK's permission callback, so there is no
   // separate interactive prompt that could hang a headless OWUI turn. canUseTool (a) enforces the
   // destructive-command guardrail and (b) drives interactive AskUserQuestion (emit a socket event →

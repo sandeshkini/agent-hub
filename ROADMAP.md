@@ -26,6 +26,12 @@ Last updated: 2026-08-08
 
 ## 2. Recently done (this work session)
 
+- **Background subagents now return (2026-08-09)** — the Claude adapter ran one query() per message and
+  quit at the first `result`, which tore down parallel/`run_in_background` subagents mid-flight (their
+  results never came back). Switched to **streaming-input mode** + a drain loop: track
+  `background_tasks_changed`, and only finalize once a `result` arrives with no live background tasks and
+  the model idles. Verified end-to-end (6-way and 2-way fan-outs synthesize correctly; plain prompts
+  unchanged). This unblocks Phase-2 orchestration.
 - **Safe-deploy pipeline (2026-08-09)** — the OWUI fork now ships through a render gate:
   `owui-fork/smoke-test.sh` (headless-chromium check) + a staging container (`:3001`, own volume) +
   `owui-fork/deploy.sh` (`deploy|staging|promote|rollback`). A white-screen build is caught on staging

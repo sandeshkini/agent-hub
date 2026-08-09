@@ -273,15 +273,60 @@ async function* streamTurn(chatId, model, messages, ctx = {}) {
   if (sys) opts.appendSystemPrompt = sys;                                   // also as a real system prompt (covers image turns)
   if (resume) opts.resume = resume;
 
+  // STREAMING-INPUT MODE (background-subagent fix): drive the SDK with an async-iterable prompt kept OPEN
+  // past the first `result`, so background subagents / `run_in_background` tasks can finish and their
+  // results flow back — the SDK auto-re-invokes the model on each completion. We close the input only once
+  // the turn is truly done. (A single-string prompt ends at the first `result`, tearing down live subagents.)
+  let finishInput = () => {};
+  const inputClosed = new Promise((r) => (finishInput = r));
+  async function* streamingInput() {
+    if (typeof prompt === "string") yield { type: "user", message: { role: "user", content: prompt } };
+    else for await (const um2 of prompt) yield um2;   // image turn already yields one user message
+    await inputClosed;                                  // hold the session open until we finalize
+  }
   let q;
-  try { q = query({ prompt, options: opts }); }
+  try { q = query({ prompt: streamingInput(), options: opts }); }
   catch (e) { yield { content: `\n_Claude adapter error: ${e && e.message || e}_` }; return; }
 
   let streamedText = "", tool = {}, toolJson = {}, toolQueue = [], pendingTools = {}, completed = false;
   let thinking = {};   // FIX(bug1): per-block accumulator for thinking_delta text
+  // ── background-subagent drain state (streaming-input fix) ──
+  const BG_DRAIN_GRACE_MS = Number(process.env.CLAUDE_BG_DRAIN_GRACE_MS || 4000);   // after tasks drain, wait this long for the model's follow-up synthesis turn before finalizing
+  const BG_WAIT_MAX_MS = Number(process.env.CLAUDE_BG_WAIT_MAX_SEC || 900) * 1000;  // hard cap while a live background task goes silent
+  const TIMEOUT = Symbol("timeout");
+  let liveBg = 0, usedBackground = false, drainPending = false, waitNoteShown = false;
+  const it = q[Symbol.asyncIterator]();
   try {
-    for await (const m of q) {
+    for (;;) {
+      // Time-box the await ONLY while waiting on background work: a short grace after tasks drain (to catch
+      // the model's follow-up synthesis turn) or a long cap while a live task runs. Normal streaming is
+      // never time-boxed — a long single turn is fine.
+      const timeoutMs = drainPending ? BG_DRAIN_GRACE_MS : (liveBg > 0 ? BG_WAIT_MAX_MS : 0);
+      let step;
+      if (timeoutMs) {
+        let to; const timer = new Promise((res) => { to = setTimeout(() => res(TIMEOUT), timeoutMs); });
+        step = await Promise.race([it.next(), timer]); clearTimeout(to);
+        if (step === TIMEOUT) {
+          if (liveBg > 0) yield { content: `\n\n_⚠️ background task(s) still running after ${Math.round(BG_WAIT_MAX_MS / 1000)}s — detaching; they keep running on the host._\n` };
+          completed = true; break;   // model idled after draining, or the hard cap fired
+        }
+      } else {
+        step = await it.next();
+      }
+      if (step.done) { completed = true; break; }
+      const m = step.value;
+      // Any real content activity means the model started/continued a turn → cancel a pending finalize.
+      if (m.type === "assistant" || m.type === "stream_event" || m.type === "user") drainPending = false;
       if (m.type === "system" && m.subtype === "init") { if (m.session_id) cachePut(conv, m.session_id); }
+      else if (m.type === "system" && m.subtype === "background_tasks_changed") {
+        // BACKGROUND-SUBAGENT FIX: track live background tasks (REPLACE semantics). While any are live we
+        // must NOT end the turn — ending it is exactly what tore down parallel subagents mid-flight.
+        liveBg = (m.tasks || []).length;
+        if (liveBg > 0) { usedBackground = true; drainPending = false; }
+      }
+      else if (m.type === "system" && (m.subtype === "task_notification" || m.subtype === "task_progress")) {
+        drainPending = false;   // a background task finished/progressed; the SDK re-invokes the model to use it
+      }
       else if (m.type === "stream_event") {
         const ev = m.event;
         if (ev?.type === "content_block_start" && ev.content_block?.type === "tool_use") {
@@ -340,14 +385,23 @@ async function* streamTurn(chatId, model, messages, ctx = {}) {
         if (m.session_id) cachePut(conv, m.session_id);
         if (m.usage) yield { usage: m.usage };
         if (m.subtype && m.subtype !== "success" && !streamedText) yield { content: `\n_(${m.subtype})_` };
-        completed = true;
-        break;
+        // BACKGROUND-SUBAGENT FIX: a `result` ends a TURN, not necessarily the whole run.
+        if (liveBg > 0) {
+          // background subagents still running — wait (the SDK re-invokes the model as each one reports).
+          if (!waitNoteShown) { waitNoteShown = true; yield { content: `\n\n_⏳ ${liveBg} background task(s) running — waiting for results…_\n` }; }
+          drainPending = false;
+          continue;
+        }
+        if (!usedBackground) { completed = true; break; }   // fast path: no background tasks were used → done now
+        drainPending = true;   // background drained; grace-wait for a follow-up synthesis turn, else finalize
+        continue;
       }
     }
   } catch (e) {
     console.error("[owui-claude] streamTurn error:", e && e.stack || e && e.message || e);   // never swallow silently
     yield { content: `\n\n_⚠️ Claude adapter hiccup (${String(e && e.message || e).slice(0, 200)}). Partial result is above — resend to continue._` };
   } finally {
+    try { finishInput(); } catch {}   // close the streaming-input session so query() shuts down cleanly
     // interrupt ONLY if the turn didn't finish (client aborted). On normal completion the
     // process is already gone and interrupt() rejects — catch that (it's a promise, not a throw).
     if (!completed) { try { const p = q && q.interrupt && q.interrupt(); if (p && p.catch) p.catch(() => {}); } catch (e) { console.error('[owui-claude] interrupt error:', e); } }   // FIX(bug4): don't swallow silently

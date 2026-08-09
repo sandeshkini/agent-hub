@@ -1459,10 +1459,10 @@ index 0000000..b5b9113
 +}
 diff --git a/src/lib/utils/agentTerminals.ts b/src/lib/utils/agentTerminals.ts
 new file mode 100644
-index 0000000..aa55061
+index 0000000..c10baf0
 --- /dev/null
 +++ b/src/lib/utils/agentTerminals.ts
-@@ -0,0 +1,185 @@
+@@ -0,0 +1,239 @@
 +// LOCAL PATCH (agent-hub fork): shared terminal-session store — now CROSS-DEVICE SYNCED.
 +// Terminal sessions live in the left sidebar (like chats) and drive the /terminal page. The list is
 +// cached in localStorage for instant paint AND persisted server-side (fork `/api/v1/terminal-sessions`)
@@ -1473,7 +1473,7 @@ index 0000000..aa55061
 +import { writable, get } from 'svelte/store';
 +import { browser } from '$app/environment';
 +import { WEBUI_API_BASE_URL } from '$lib/constants';
-+import { selectedTerminalId } from '$lib/stores'; // LOCAL PATCH (E10): stamp each shell's machine
++import { selectedTerminalId, terminalServers } from '$lib/stores'; // LOCAL PATCH (E10): stamp each shell's machine
 +
 +export type TerminalSession = {
 +	id: string;
@@ -1481,6 +1481,7 @@ index 0000000..aa55061
 +	createdAt: number;
 +	pinned?: boolean;
 +	serverId?: string; // which machine this shell runs on (multi-machine); optional
++	discovered?: boolean; // LOCAL PATCH: a LIVE shell found on a machine's terminal server (not opened here)
 +};
 +
 +const LS_KEY = 'agent-hub:terminal-sessions';
@@ -1566,6 +1567,51 @@ index 0000000..aa55061
 +	} catch {}
 +};
 +
++// LOCAL PATCH (cross-machine terminal discovery): the sync store above only lists shells opened through
++// THIS hub. But live PTYs on each machine's terminal server may have been started elsewhere (another
++// device, the machine's own UI, an agent). Ask every terminal server for its live sessions and merge
++// them in as `discovered` entries so ANY running shell on a machine shows up here — tapping one attaches
++// to the live PTY (create_session re-attaches by id). Discovered entries are display-only: they never
++// push to the sync store (guarded by _applying), and stale ones are pruned each pass.
++export const discoverSessions = async () => {
++	if (!browser) return;
++	if (typeof document !== 'undefined' && document.hidden) return;
++	const servers = get(terminalServers) ?? [];
++	const found: TerminalSession[] = [];
++	for (const srv of servers) {
++		if (!srv?.id) continue;
++		try {
++			const r = await fetch(`${WEBUI_API_BASE_URL}/terminals/${srv.id}/api/terminals/sessions`, {
++				headers: { Authorization: `Bearer ${token()}` }
++			});
++			if (!r.ok) continue;
++			const d = await r.json();
++			for (const s of d?.sessions ?? []) {
++				if (!s?.id) continue;
++				found.push({
++					id: s.id,
++					name: 'Shell ' + String(s.id).slice(-4),
++					createdAt: Date.now(),
++					serverId: srv.id,
++					discovered: true
++				});
++			}
++		} catch {}
++	}
++	// Merge: keep everything we opened locally (discovered !== true); replace the discovered set with the
++	// freshly-found live shells, skipping ids we already track locally. Suppress the sync push.
++	_applying = true;
++	try {
++		const local = get(terminalSessions).filter((x) => !x.discovered);
++		const localIds = new Set(local.map((x) => x.id));
++		const fresh = found.filter((f) => !localIds.has(f.id));
++		terminalSessions.set([...local, ...fresh]);
++		persistLocal();
++	} finally {
++		_applying = false;
++	}
++};
++
 +// React to any change: cache locally, and (once hydrated, and not mid-apply) bump rev + push.
 +const onChange = () => {
 +	if (!browser) return;
@@ -1583,13 +1629,21 @@ index 0000000..aa55061
 +let _hydrateResolve: (() => void) | null = null;
 +const _hydrated: Promise<void> = browser ? new Promise((r) => (_hydrateResolve = r)) : Promise.resolve();
 +
++const refresh = () => {
++	pullTerminalSessions();
++	discoverSessions(); // merge live shells from every machine's terminal server
++};
++
 +if (browser) {
 +	_ready = true;
 +	// Initial hydrate from server, then keep fresh on focus + a light poll.
-+	pullTerminalSessions().finally(() => _hydrateResolve?.());
-+	window.addEventListener('focus', pullTerminalSessions);
-+	window.addEventListener('online', pullTerminalSessions);
-+	setInterval(pullTerminalSessions, POLL_MS);
++	pullTerminalSessions().finally(() => {
++		_hydrateResolve?.();
++		discoverSessions();
++	});
++	window.addEventListener('focus', refresh);
++	window.addEventListener('online', refresh);
++	setInterval(refresh, POLL_MS);
 +}
 +
 +const uid = () =>

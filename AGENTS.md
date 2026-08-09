@@ -17,9 +17,12 @@ It runs from `~/Documents/apps/agent-hub` on **aibo** (Linux). User setup → `R
    ```bash
    UP=owui-fork/upstream
    git -C "$UP" add -A && git -C "$UP" diff --cached > owui-fork/patches/0001-terminal-page.patch && git -C "$UP" reset -q
-   ./owui-fork/build.sh                                   # wait for "== built …"
-   docker compose up -d --force-recreate open-webui
+   ./owui-fork/deploy.sh                                  # gated: build → staging render-test → promote
    ```
+1b. **Ship the fork ONLY via `./owui-fork/deploy.sh` — NEVER a bare `docker compose up -d --force-recreate
+   open-webui`.** A broken build returns HTTP 200 but a BLANK page; `deploy.sh` render-tests it in headless
+   chromium on a staging container (`:3001`) before prod and keeps a `:prev` rollback (`deploy.sh rollback`).
+   Full guide: `owui-fork/DEPLOYING.md`. (`build.sh` alone only builds — it does not gate or deploy.)
 2. **Never run two fork builds at once** and **don't double-background** (`run_in_background:true` +
    `nohup &`). Concurrent builds race on the shared `upstream/` git tree and corrupt the image. One
    build, foreground, wait for `== built`.

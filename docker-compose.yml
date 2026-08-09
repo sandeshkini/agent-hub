@@ -23,7 +23,7 @@ services:
       - "${OWUI_PORT:-3000}:8080"
     volumes:
       - open-webui:/app/backend/data
-    environment:
+    environment: &owui-env         # anchored so open-webui-staging reuses the EXACT same env (no drift)
       WEBUI_NAME: "Aibo Agents"
       WEBUI_AUTH: "false"
       WEBUI_SECRET_KEY: "${WEBUI_SECRET_KEY}"     # PINNED → stable JWT sessions across restarts
@@ -87,6 +87,26 @@ services:
       TERMINAL_SERVER_CONNECTIONS: "${TERMINAL_SERVERS_JSON:-[{\"id\":\"${TERMINAL_ID:-aibo}\",\"name\":\"${TERMINAL_NAME:-aibo (host shell)}\",\"url\":\"http://host.docker.internal:7681\",\"auth_type\":\"bearer\",\"key\":\"${TERMINAL_TOKEN}\",\"enabled\":true,\"access_control\":null}]}"
     depends_on:
       - owui-hermes
+    networks:
+      - default
+      - apps
+
+  # STAGING / render-gate canary — a 2nd OWUI on :3001 with its OWN volume (never touches prod chats).
+  # owui-fork/deploy.sh render-tests a new build HERE before promoting to prod; also reachable at
+  # staging.operator.kingdomofluna.com to eyeball UI changes. `extends` mirrors prod's full env (zero
+  # duplication). OFF by default (profile "staging") — deploy.sh brings it up on demand.
+  open-webui-staging:
+    image: ${OWUI_IMAGE:-agent-hub/open-webui:v0.11.0-fork}
+    container_name: open-webui-staging
+    profiles: ["staging"]
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:${OWUI_STAGING_PORT:-3001}:8080"
+    volumes:
+      - open-webui-staging:/app/backend/data
+    environment: *owui-env         # same env as prod (aliased) — faithful render test
     networks:
       - default
       - apps
@@ -291,6 +311,7 @@ services:
 volumes:
   open-webui:
     external: true
+  open-webui-staging:            # staging/canary data — compose-managed (not external), safe to wipe
   ollama:
     external: true
 

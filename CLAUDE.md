@@ -42,7 +42,22 @@ Everything runs from `~/Documents/apps/agent-hub` on **aibo** (Linux). Repo:
 
 ## 2. THE BUILD/DEPLOY WORKFLOW — read before touching the fork
 
-The single most important thing. Getting this wrong silently ships stale/empty images.
+The single most important thing. Getting this wrong silently ships stale/empty images **or a white
+screen straight to prod**.
+
+> ⚠️ **DEPLOY THE FORK ONLY VIA `./owui-fork/deploy.sh`.** Never run
+> `docker compose up -d --force-recreate open-webui` by hand. A broken fork build still returns HTTP 200
+> (backend + SPA shell serve) while the Svelte app throws at mount → the whole page is BLANK. `deploy.sh`
+> render-tests the candidate in headless chromium on a **staging** container (`:3001`, own volume) BEFORE
+> prod, and keeps an instant rollback point (`:prev`). Full guide: **`owui-fork/DEPLOYING.md`**.
+>
+> ```bash
+> ./owui-fork/deploy.sh            # build → staging → render-gate → promote to prod (+ auto-rollback on fail)
+> ./owui-fork/deploy.sh staging    # build → staging → render-gate → STOP (review at staging URL) → then `promote`
+> ./owui-fork/deploy.sh rollback   # instant revert to the previous prod image (:prev)
+> ```
+> Gate failure ⇒ `❌ … PROD UNTOUCHED`. This is verified: an intentional render crash was caught on
+> staging while prod kept rendering. The steps below are the underlying mechanics `deploy.sh` runs.
 
 ### Fork (Open WebUI) changes — frontend Svelte OR backend FastAPI under `owui-fork/upstream/`
 `owui-fork/upstream/` is a **pinned upstream checkout (v0.11.0), gitignored**. Our changes live ONLY
@@ -56,10 +71,8 @@ UP=owui-fork/upstream
 git -C "$UP" add -A
 git -C "$UP" diff --cached > owui-fork/patches/0001-terminal-page.patch
 git -C "$UP" reset -q
-# 3. build ONE image (see gotcha #2 about double-backgrounding)
-./owui-fork/build.sh          # prints "== built agent-hub/open-webui:v0.11.0-fork ==" on success
-# 4. deploy
-docker compose up -d --force-recreate open-webui
+# 3 + 4. build AND deploy through the render gate (build.sh + staging render-test + promote + rollback point)
+./owui-fork/deploy.sh          # ← USE THIS. (build.sh alone only builds; deploy.sh gates + promotes safely)
 # 5. verify the change is actually in the running container (not a cache ghost — gotcha #3)
 docker exec open-webui sh -c "grep -rl '<a string from your change>' /app/build | head"      # frontend
 docker exec open-webui sh -c "grep -c '<marker>' /app/backend/open_webui/routers/<file>.py"    # backend
@@ -122,8 +135,11 @@ git pull --rebase origin main && git push origin main   # the MacBook also pushe
    list. They are not one federated app. Cross-machine terminal *discovery* (see §4) bridges live shells,
    but chat lists are per-instance.
 
-8. **Deploy = `--force-recreate`.** The fork image tag `agent-hub/open-webui:v0.11.0-fork` is replaced
-   in place; `docker compose up -d --force-recreate open-webui` recreates the container from it.
+8. **Deploy the fork ONLY via `./owui-fork/deploy.sh`** (render-gate + staging + rollback). A bare
+   `docker compose up -d --force-recreate open-webui` ships a white screen (HTTP-200-but-blank) to prod
+   with no gate — that's exactly the failure this pipeline prevents. See §2 + `owui-fork/DEPLOYING.md`.
+   Under the hood the fork image tag `agent-hub/open-webui:v0.11.0-fork` is replaced in place and the
+   container recreated from it; `deploy.sh` wraps that with a render check and a `:prev` rollback point.
 
 9. **Secrets never leave `.env`** (gitignored). Never commit tokens. A leaked default password
    (`hermesluna`) once got into public history and had to be rotated live — don't hardcode secrets.

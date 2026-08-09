@@ -928,10 +928,73 @@ index 87a4029..575e689 100644
  									id={embedded ? messageInputDropzoneId : undefined}
  									class=" pb-2 {dragged ? 'z-0' : 'z-10'}"
 diff --git a/src/lib/components/chat/MessageInput.svelte b/src/lib/components/chat/MessageInput.svelte
-index 883bdba..32be20f 100644
+index 883bdba..61c7de1 100644
 --- a/src/lib/components/chat/MessageInput.svelte
 +++ b/src/lib/components/chat/MessageInput.svelte
-@@ -2228,7 +2228,7 @@
+@@ -242,9 +242,7 @@
+ 				for (const type of item.types) {
+ 					if (type.startsWith('image/')) {
+ 						const blob = await item.getType(type);
+-						const file = new File([blob], `clipboard-image.${type.split('/')[1]}`, {
+-							type: type
+-						});
++						const file = safeFile([blob], `clipboard-image.${type.split('/')[1]}`, type);
+ 
+ 						inputFilesHandler([file]);
+ 					}
+@@ -857,6 +855,20 @@
+ 		}
+ 	};
+ 
++	// LOCAL PATCH (upload fix): iOS Safari/WebKit throws DOMException "The string did not match the
++	// expected pattern." from new File()/Clipboard when a MIME `type` fails its strict grammar (HEIC /
++	// parameterised types off the iOS share sheet). Build Files defensively — drop an invalid type (the
++	// browser infers it) and never let the throw bubble up as a raw toast. (function decl = hoisted.)
++	function safeFile(parts, name, type) {
++		try {
++			return type && /^[\w.+-]+\/[\w.+-]+$/.test(type)
++				? new File(parts, name, { type })
++				: new File(parts, name);
++		} catch (e) {
++			try { return new File(parts, name); } catch (e2) { return new Blob(parts); }
++		}
++	}
++
+ 	const inputFilesHandler = async (inputFiles) => {
+ 		console.log('Input files handler called with:', inputFiles);
+ 
+@@ -956,7 +968,7 @@
+ 						];
+ 					} else {
+ 						const blob = await (await fetch(imageUrl)).blob();
+-						const compressedFile = new File([blob], file.name, { type: file.type });
++						const compressedFile = safeFile([blob], file.name, file.type);
+ 
+ 						uploadFileHandler(compressedFile, false);
+ 					}
+@@ -1922,9 +1934,7 @@
+ 											try {
+ 												const fileData = await createPicker();
+ 												if (fileData) {
+-													const file = new File([fileData.blob], fileData.name, {
+-														type: fileData.blob.type
+-													});
++													const file = safeFile([fileData.blob], fileData.name, fileData.blob.type);
+ 													await uploadFileHandler(file);
+ 												} else {
+ 													console.log('No file was selected from Google Drive');
+@@ -1942,9 +1952,7 @@
+ 											try {
+ 												const fileData = await pickAndDownloadFile(authorityType);
+ 												if (fileData) {
+-													const file = new File([fileData.blob], fileData.name, {
+-														type: fileData.blob.type || 'application/octet-stream'
+-													});
++													const file = safeFile([fileData.blob], fileData.name, fileData.blob.type || 'application/octet-stream');
+ 													await uploadFileHandler(file);
+ 												} else {
+ 													console.log('No file was selected from OneDrive');
+@@ -2228,7 +2236,7 @@
  													$_user?.role === 'admin' ||
  													($_user?.permissions?.features?.direct_tool_servers ?? true)}
  												{#if terminalCapableModels.length > 0 && (($terminalServers ?? []).some((t) => t.id) || (hasDirectToolServerAccess && (($terminalServers ?? []).some((t) => !t.id) || ($settings?.terminalServers ?? []).some((s) => s.url))))}
@@ -1099,7 +1162,7 @@ index ce1eda9..04a7ab9 100644
  	<div bind:this={terminalEl} class="absolute inset-0 px-0.5" class:pointer-events-none={overlay} />
  </div>
 diff --git a/src/lib/components/layout/Sidebar.svelte b/src/lib/components/layout/Sidebar.svelte
-index f8ac62b..438b735 100644
+index f8ac62b..3080b05 100644
 --- a/src/lib/components/layout/Sidebar.svelte
 +++ b/src/lib/components/layout/Sidebar.svelte
 @@ -74,6 +74,7 @@
@@ -1250,7 +1313,7 @@ index f8ac62b..438b735 100644
 +					onAddLabel={$i18n.t('New Terminal')}
 +				>
 +					{#each visibleTerminals as t (t.id)}
-+						<div class="group w-full flex justify-between items-center rounded-xl px-2 py-[6px] {$activeTerminalId === t.id ? 'bg-black/[0.035] dark:bg-white/[0.045]' : 'hover:bg-gray-50 dark:hover:bg-gray-900'}">
++						<div class="group w-full flex justify-between items-center rounded-xl px-2 py-[6px] {$activeTerminalId === t.id && $page.url.pathname === '/terminal' ? 'bg-black/[0.035] dark:bg-white/[0.045]' : 'hover:bg-gray-50 dark:hover:bg-gray-900'}">
 +							<a class="flex items-center gap-2 flex-1 min-w-0 cursor-pointer" href="/terminal" on:click={(e) => { e.preventDefault(); activeTerminalId.set(t.id); goto('/terminal'); itemClickHandler(); }}>
 +								<div class="size-1.5 shrink-0 rounded-full bg-green-500" title={$i18n.t('Running')}></div>
 +								<div class="text-left overflow-hidden flex-1 min-w-0 h-[20px] truncate">{t.name}</div>

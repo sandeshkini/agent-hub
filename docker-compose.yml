@@ -62,7 +62,17 @@ services:
       ENABLE_TITLE_GENERATION: "false"
       ENABLE_TAGS_GENERATION: "false"
       ENABLE_FOLLOW_UP_GENERATION: "false"
-      WHISPER_MODEL: "base"
+      WHISPER_MODEL: "base"                       # STT: local faster-whisper — dictation works offline ✓
+      # TTS (read-aloud): default '' = browser speechSynthesis (works on desktop; flaky in the iOS PWA).
+      # For reliable iOS read-aloud set AUDIO_TTS_ENGINE=openai + AUDIO_TTS_OPENAI_API_BASE_URL / _API_KEY /
+      # AUDIO_TTS_MODEL(tts-1) / AUDIO_TTS_VOICE in .env. NOTE: the local 'transformers' engine is currently
+      # broken upstream (datasets lib dropped the speecht5 speaker-embeddings script). Must be set here,
+      # not the admin UI (RESET_CONFIG_ON_START wipes API-set config).
+      AUDIO_TTS_ENGINE: "${AUDIO_TTS_ENGINE:-}"
+      AUDIO_TTS_OPENAI_API_BASE_URL: "${AUDIO_TTS_OPENAI_API_BASE_URL:-}"
+      AUDIO_TTS_OPENAI_API_KEY: "${AUDIO_TTS_OPENAI_API_KEY:-}"
+      AUDIO_TTS_MODEL: "${AUDIO_TTS_MODEL:-tts-1}"
+      AUDIO_TTS_VOICE: "${AUDIO_TTS_VOICE:-alloy}"
       RESET_CONFIG_ON_START: "true"
       ENABLE_WEB_SEARCH: "true"
       WEB_SEARCH_ENGINE: "tavily"

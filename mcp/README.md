@@ -66,14 +66,25 @@ Servers fall into three classes, and only the first two work headless:
 Do **not** wrap a plain HTTP+header server in `mcp-remote` (as `.mcp.json` does for local CLI use) —
 that spawns a subprocess per turn for no benefit. Convert it to form 1 instead.
 
-**3. Interactive OAuth — NOT supported headless.** `linear`, `posthog`, `clickhouse_cloud`, and the
-Google servers authenticate through a browser consent flow. There is no token to inline, and nothing
-in a container can complete the redirect. Options, in order of sanity:
-  - use the service's REST API through a custom tool / the built-in MCP server instead;
-  - run `mcp-remote` **once interactively on the host** so it caches a token under `~/.mcp-auth`, then
-    mount that dir into the adapter and point the entry at the cached profile (fragile — the token
-    expires and nothing re-runs the flow);
-  - skip it.
+**3. Interactive OAuth — works, via a shared `mcp-remote` token cache.** `linear`, `posthog`,
+`clickhouse_cloud` and the Google servers have no static token and a container cannot complete a
+browser consent flow. Wire them as stdio entries that proxy through `mcp-remote`:
+```json
+{"name":"linear","type":"stdio","command":"npx",
+ "args":["-y","mcp-remote","https://mcp.linear.app/mcp","--transport","http"]}
+```
+Then authenticate ONCE on the host (browser opens; approve; Ctrl-C):
+```bash
+npx -y mcp-remote https://mcp.linear.app/mcp --transport http
+```
+`mcp-remote` caches the token under `~/.mcp-auth`. This carries into the containers because the host
+home is mounted at `${WORKSPACE}` **and** `HOME=${WORKSPACE}` inside the adapters — so
+`$HOME/.mcp-auth` in the container *is* the host's cache. The mount is read-write, so silent token
+refresh writes back. Verified: Claude and Hermes both return real Linear/PostHog/ClickHouse data.
+
+⚠️ `mcp-remote` refreshes *access* tokens on its own, but if a **refresh** token hard-expires the flow
+must be re-run interactively on the host — nothing in a container can do it. Symptom: that server's
+tools quietly stop appearing. Re-run the one-liner above to fix.
 
 **4. Needs a host binary** (e.g. `planetscale` → `pscale`): the binary does not exist in the adapter
 image. Either add it to the image, or expose the data another way. Not wired by default.

@@ -217,16 +217,17 @@ index 0000000..ee17b5d
 +        raise HTTPException(status_code=502, detail=f"adapter unreachable: {e}")
 diff --git a/backend/open_webui/routers/agent_inbox.py b/backend/open_webui/routers/agent_inbox.py
 new file mode 100644
-index 0000000..80eaf61
+index 0000000..b9e66ff
 --- /dev/null
 +++ b/backend/open_webui/routers/agent_inbox.py
-@@ -0,0 +1,171 @@
+@@ -0,0 +1,178 @@
 +# LOCAL PATCH (agent-hub fork): E2 Inbox with real-time smart summaries.
 +# Returns the user's chat list (same snippet/active/unread data as OWUI's list) with a one-line
 +# LLM summary attached per chat. Summaries are cached and regenerated ONLY when a chat changes
 +# (updated_at), in the background (bounded concurrency), via the local Ollama model — so the /inbox
 +# page can poll this cheaply and watch summaries update live. Additive: new router, own prefix.
 +import asyncio
++import logging
 +import os
 +
 +import aiohttp
@@ -237,6 +238,8 @@ index 0000000..80eaf61
 +from open_webui.models.chats import Chats
 +from open_webui.routers.chats import add_active_state_to_chat_list
 +from open_webui.utils.auth import get_verified_user
++
++log = logging.getLogger(__name__)
 +
 +router = APIRouter()
 +
@@ -377,7 +380,11 @@ index 0000000..80eaf61
 +        limit=40,
 +        db=db,
 +    )
-+    chats = await add_active_state_to_chat_list(request, chats)
++    try:
++        chats = await add_active_state_to_chat_list(request, chats)
++    except Exception as e:
++        # Never 500 the whole Inbox page if the active-state decoration fails — fall back to the raw list.
++        log.warning(f"[inbox] add_active_state_to_chat_list failed, using raw list: {e}")
 +
 +    out = []
 +    for c in chats:
@@ -519,10 +526,10 @@ index 0000000..52453d6
 +    return {"deleted": existed}
 diff --git a/backend/open_webui/routers/agent_runs.py b/backend/open_webui/routers/agent_runs.py
 new file mode 100644
-index 0000000..5ddeff4
+index 0000000..cb456fa
 --- /dev/null
 +++ b/backend/open_webui/routers/agent_runs.py
-@@ -0,0 +1,96 @@
+@@ -0,0 +1,101 @@
 +# LOCAL PATCH (agent-hub fork, Phase 1): agent run / question PRESENCE registry.
 +#
 +# Purpose: make it visible, hub-wide, what every agent is doing — and stop a blocked run from becoming
@@ -573,7 +580,9 @@ index 0000000..5ddeff4
 +        age = now - r.get("updated_at", 0)
 +        if age > STALE_TTL:
 +            drop.append(cid)
-+        elif r.get("status") in ("done", "failed") and not r.get("question") and age > DONE_TTL:
++        elif r.get("status") in ("done", "failed") and age > DONE_TTL:
++            # Drop a finished run after DONE_TTL regardless of a leftover parked question — a done/failed
++            # run must never keep showing a stale "needs input" badge on an already-answered chat.
 +            drop.append(cid)
 +    for cid in drop:
 +        _runs.pop(cid, None)
@@ -595,6 +604,9 @@ index 0000000..5ddeff4
 +    r = _runs.get(cid) or {}
 +    if "status" in body:
 +        r["status"] = body.get("status")
++        # A finished turn can't still be "waiting for input" — clear any parked question so no stale badge.
++        if body.get("status") in ("done", "failed") and "question" not in body:
++            r["question"] = None
 +    if "model" in body:
 +        r["model"] = body.get("model")
 +    if "question" in body:                 # {id, message_id, questions} to park, or null/None to clear

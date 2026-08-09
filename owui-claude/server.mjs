@@ -27,6 +27,24 @@ if (!existsSync(WORKSPACE)) mkdirSync(WORKSPACE, { recursive: true });
 process.on("unhandledRejection", (e) => console.error("[owui-claude] unhandledRejection:", e && e.message || e));
 process.on("uncaughtException", (e) => console.error("[owui-claude] uncaughtException:", e && e.message || e));
 
+// GRACEFUL DRAIN on restart. Without this, a `systemctl restart` (or any SIGTERM) kills the process
+// mid-stream: the SSE response is severed with NO finish_reason:"stop" and NO `data: [DONE]`, so OWUI
+// stores a BROKEN empty/partial assistant message and the chat becomes un-typeable. Each in-flight
+// streaming turn registers a `finalize()` here; on SIGTERM we flush a clean close (partial text + an
+// "interrupted, resend" note + stop + [DONE]) and mirror it into the chat, THEN exit.
+const activeTurns = new Set();
+let shuttingDown = false;
+function gracefulShutdown(sig) {
+  if (shuttingDown) return; shuttingDown = true;
+  const n = activeTurns.size;
+  console.error(`[owui-claude] ${sig} — draining ${n} in-flight turn(s) before exit`);
+  for (const t of activeTurns) { try { t.finalize(); } catch (e) { console.error("[owui-claude] drain error:", e && e.message || e); } }
+  // give mirror.done() POSTs + SSE flush a moment, then exit (systemd TimeoutStopSec covers us)
+  setTimeout(() => process.exit(0), n ? 2500 : 100);
+}
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+process.on("SIGINT", () => gracefulShutdown("SIGINT"));
+
 const sessions = new Map();            // chat_id -> resume session_id (bounded)
 const CACHE_MAX = 512;
 function cacheGet(k) { const v = sessions.get(k); if (v) { sessions.delete(k); sessions.set(k, v); } return v; }
@@ -282,8 +300,9 @@ async function* streamTurn(chatId, model, messages, ctx = {}) {
   if (resume) opts.resume = resume;
   // ── optional tuning (env-gated; UNSET = SDK defaults, so behavior is unchanged unless you configure it) ──
   if (process.env.CLAUDE_EFFORT) opts.effort = process.env.CLAUDE_EFFORT.trim();                                  // low|medium|high|xhigh|max — reasoning depth
-  if (process.env.CLAUDE_THINKING_TOKENS) opts.thinking = { type: "enabled", budgetTokens: Number(process.env.CLAUDE_THINKING_TOKENS) };
-  else if ((process.env.CLAUDE_THINKING || "").trim() === "adaptive") opts.thinking = { type: "adaptive" };       // let the model size its own thinking
+  if ((process.env.CLAUDE_THINKING || "").trim() === "adaptive") opts.thinking = { type: "adaptive" };            // let the model size its own thinking
+  // NOTE: no explicit budgetTokens form — Sonnet-5/Opus-5 reject `thinking.budget_tokens` (400). Use
+  // CLAUDE_EFFORT (low..max) or CLAUDE_THINKING=adaptive to tune reasoning depth on current models.
   if (process.env.CLAUDE_MAX_TURNS) opts.maxTurns = Number(process.env.CLAUDE_MAX_TURNS);                          // safety cap on agent loop length
   if (process.env.CLAUDE_MAX_BUDGET_USD) opts.maxBudgetUsd = Number(process.env.CLAUDE_MAX_BUDGET_USD);            // hard spend cap per turn
   if (process.env.CLAUDE_FALLBACK_MODEL) opts.fallbackModel = process.env.CLAUDE_FALLBACK_MODEL.trim();            // used if the primary is overloaded
@@ -310,25 +329,27 @@ async function* streamTurn(chatId, model, messages, ctx = {}) {
   const BG_DRAIN_GRACE_MS = Number(process.env.CLAUDE_BG_DRAIN_GRACE_MS || 4000);   // after tasks drain, wait this long for the model's follow-up synthesis turn before finalizing
   const BG_WAIT_MAX_MS = Number(process.env.CLAUDE_BG_WAIT_MAX_SEC || 900) * 1000;  // hard cap while a live background task goes silent
   const TIMEOUT = Symbol("timeout");
+  const ABS_TURN_MS = Number(process.env.CLAUDE_TURN_MAX_SEC || 1800) * 1000;   // absolute ceiling so a hung SDK stream can't hold the connection forever
   let liveBg = 0, usedBackground = false, drainPending = false, waitNoteShown = false;
   const it = q[Symbol.asyncIterator]();
+  let pending = null;   // the in-flight it.next() promise — RETAINED across timed waits so a race-timeout never abandons (loses) a message
   try {
     for (;;) {
-      // Time-box the await ONLY while waiting on background work: a short grace after tasks drain (to catch
-      // the model's follow-up synthesis turn) or a long cap while a live task runs. Normal streaming is
-      // never time-boxed — a long single turn is fine.
-      const timeoutMs = drainPending ? BG_DRAIN_GRACE_MS : (liveBg > 0 ? BG_WAIT_MAX_MS : 0);
-      let step;
-      if (timeoutMs) {
-        let to; const timer = new Promise((res) => { to = setTimeout(() => res(TIMEOUT), timeoutMs); });
-        step = await Promise.race([it.next(), timer]); clearTimeout(to);
-        if (step === TIMEOUT) {
-          if (liveBg > 0) yield { content: `\n\n_⚠️ background task(s) still running after ${Math.round(BG_WAIT_MAX_MS / 1000)}s — detaching; they keep running on the host._\n` };
-          completed = true; break;   // model idled after draining, or the hard cap fired
-        }
-      } else {
-        step = await it.next();
+      // Every await is time-boxed: a short grace after tasks drain (to catch the model's follow-up synthesis
+      // turn), a long cap while a live background task runs, else the absolute turn ceiling. Crucially we reuse
+      // ONE `pending` promise instead of calling it.next() afresh each loop — calling next() twice would queue
+      // two reads and the abandoned one would silently drop a message (bug: could lose the synthesis / the
+      // "background done" signal → false hang).
+      const timeoutMs = drainPending ? BG_DRAIN_GRACE_MS : (liveBg > 0 ? BG_WAIT_MAX_MS : ABS_TURN_MS);
+      if (!pending) pending = it.next();
+      let to; const timer = new Promise((res) => { to = setTimeout(() => res(TIMEOUT), timeoutMs); });
+      const step = await Promise.race([pending, timer]); clearTimeout(to);
+      if (step === TIMEOUT) {
+        if (liveBg > 0) yield { content: `\n\n_⚠️ background task(s) still running after ${Math.round(BG_WAIT_MAX_MS / 1000)}s — detaching; they keep running on the host._\n` };
+        else if (!drainPending) yield { content: `\n\n_⚠️ this turn exceeded the ${Math.round(ABS_TURN_MS / 1000)}s limit and was ended. Resend to continue._\n` };
+        completed = true; break;   // drained+idle (silent), or a real timeout (noted)
       }
+      pending = null;   // consumed this value
       if (step.done) { completed = true; break; }
       const m = step.value;
       // Any real content activity means the model started/continued a turn → cancel a pending finalize.
@@ -627,6 +648,22 @@ const server = http.createServer((req, res) => {
       if (!mirror.on && gen.return) gen.return();   // no chat to mirror to → abort like before
     });
     let full = "";
+    // Register for graceful drain on SIGTERM (see gracefulShutdown). finalize() writes a clean close so
+    // OWUI never persists a broken/empty message when the adapter restarts mid-turn.
+    const turn = {
+      finalize: () => {
+        if (turn.done) return; turn.done = true;
+        try {
+          const note = (full ? "\n\n" : "") + "_⚠️ adapter is restarting — this turn was interrupted. Resend to continue._";
+          full += note;
+          if (!res.writableFinished) { try { send({ content: note }); send({}, "stop"); res.write("data: [DONE]\n\n"); } catch {} }
+          mirror.update(full); mirror.done(full).catch(() => {});
+        } catch {}
+        try { gen.return && gen.return(); } catch {}
+        try { if (!res.writableFinished) res.end(); } catch {}
+      },
+    };
+    activeTurns.add(turn);
     try {
       send({ role: "assistant" });
       for await (const d of gen) {
@@ -641,6 +678,7 @@ const server = http.createServer((req, res) => {
       await mirror.done(full);
       if (!clientGone) { send({}, "stop"); res.write("data: [DONE]\n\n"); }
     } catch { try { await mirror.done(full); } catch {} }
+    finally { turn.done = true; activeTurns.delete(turn); }   // completed (or drained) → unregister
     if (kaTimer) { clearInterval(kaTimer); kaTimer = null; }   // E7: stop any AskUserQuestion keepalive
     if (mirror.on) ffClear(chatId, mirror.mid);   // run finished → drop the durable record
     try { res.end(); } catch {}

@@ -40,7 +40,11 @@ ADAPTER_KEY = os.getenv("ADAPTER_KEY", "")          # if set, require Bearer <ke
 PORT = int(os.getenv("PORT", "9211"))
 MODEL_ID = "hermes"
 
-IDLE_TIMEOUT = float(os.getenv("IDLE_TIMEOUT", "180"))   # end turn after N s w/ no event
+IDLE_TIMEOUT = float(os.getenv("IDLE_TIMEOUT", "180"))   # end turn after N s w/ no event (between frames)
+# CONV-FLOW: the FIRST frame can legitimately take much longer than IDLE_TIMEOUT — image analysis runs a
+# local VLM (up to ~45s/image) and a cold model spins up — so give a generous grace before the first frame
+# arrives, then tighten to IDLE_TIMEOUT. Prevents "Ended after no output; Hermes may still be working."
+FIRST_TOKEN_TIMEOUT = float(os.getenv("FIRST_TOKEN_TIMEOUT", "300"))
 ABS_TIMEOUT = float(os.getenv("ABS_TIMEOUT", "1800"))    # hard safety cap
 TOOL_OUTPUT_CAP = int(os.getenv("TOOL_OUTPUT_CAP", "4000"))
 HEARTBEAT_EVERY = 10.0
@@ -318,7 +322,7 @@ def stream_turn(chat_id, messages):
             usage = None
             reasoning_buf = ""       # FIX: accumulate thinking/reasoning deltas
             reasoning_open = False   # FIX: whether a reasoning block is mid-stream
-            idle_deadline = time.monotonic() + IDLE_TIMEOUT
+            idle_deadline = time.monotonic() + FIRST_TOKEN_TIMEOUT   # CONV-FLOW: generous until the 1st frame; line below tightens to IDLE_TIMEOUT
             abs_deadline = time.monotonic() + ABS_TIMEOUT
             last_beat = time.monotonic()
 
@@ -354,9 +358,15 @@ def stream_turn(chat_id, messages):
                                 yield {"content": "_Hermes: session expired and could not be recreated._"}
                                 break
                             _cache_put(conv, sid)
+                            # CONV-FLOW (#5): a fresh session loses the primed transcript — rebuild it so the
+                            # follow-up keeps context, and re-arm the first-token grace for the new submit.
+                            prior2 = _transcript(messages)
+                            text = (f"[Continuing an earlier conversation — context so far:\n{prior2}\n\n"
+                                    f"The user now says:]\n{last}") if prior2 else last
                             if images:
                                 _attach_images(conn, sid, images)
                             submit_rid = conn.send("prompt.submit", {"session_id": sid, "text": text})
+                            idle_deadline = time.monotonic() + FIRST_TOKEN_TIMEOUT
                         continue
 
                     if f.get("method") != "event":

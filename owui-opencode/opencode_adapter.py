@@ -239,6 +239,7 @@ def _stream_turn_locked(sid, model_id, text, _sys, gone=None):
     seen_tools = {}            # partID -> True (header emitted)
     tool_done = set()          # partID (result emitted)
     got_text = False
+    saw_part = False           # CONV-FLOW: has THIS turn produced any part event yet? (guards stale idle)
     # FIX (4): route reasoning/thinking deltas into a collapsible block instead of dropping.
     part_types = {}            # partID -> announced part type ("reasoning"/"text"/…)
     reasoning_open = False     # whether a <details type="reasoning"> block is mid-stream
@@ -283,8 +284,6 @@ def _stream_turn_locked(sid, model_id, text, _sys, gone=None):
                     yield {"heartbeat": True}
                 continue
 
-            if not done_turn:                       # FIX (5): don't let late events extend a done turn
-                idle_deadline = time.monotonic() + IDLE_TIMEOUT
             if o.get("__eof__"):
                 break
             # Per-event processing is wrapped: a single malformed event is logged and SKIPPED
@@ -294,6 +293,12 @@ def _stream_turn_locked(sid, model_id, text, _sys, gone=None):
                 props = o.get("properties", {}) or {}
                 if props.get("sessionID") != sid:
                     continue
+                # CONV-FLOW (#3): only THIS session's events extend the idle clock — foreign-session
+                # events on opencode's shared /event stream used to reset it, masking a real stall.
+                if not done_turn:
+                    idle_deadline = time.monotonic() + IDLE_TIMEOUT
+                if typ and typ.startswith("message.part"):
+                    saw_part = True
 
                 # FIX (3): opencode surfaced an error for this session — show it, end the turn.
                 if typ == "session.error":
@@ -359,6 +364,12 @@ def _stream_turn_locked(sid, model_id, text, _sys, gone=None):
                             yield {"content": tool_card(name, args, out, status == "error")}
 
                 elif typ == "session.idle":
+                    # CONV-FLOW (#2): a stale/transient session.idle for this REUSED session id (left over
+                    # from the previous turn, or emitted before generation starts) must NOT end a fresh turn
+                    # with no output ("Ended after no output"). Honor idle only once this turn has actually
+                    # produced something, or the blocking POST /message has returned.
+                    if not (got_text or saw_part or post_result.get("done")):
+                        continue
                     done_turn = True            # FIX (5): mark terminal; stop extending the turn
                     tail = _close_reasoning()   # FIX (4): flush any open reasoning block
                     if tail:

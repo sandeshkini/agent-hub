@@ -602,10 +602,10 @@ index 0000000..3ad82bf
 +        return incoming
 diff --git a/src/lib/components/chat/AgentQuestion.svelte b/src/lib/components/chat/AgentQuestion.svelte
 new file mode 100644
-index 0000000..cc84218
+index 0000000..2cca353
 --- /dev/null
 +++ b/src/lib/components/chat/AgentQuestion.svelte
-@@ -0,0 +1,99 @@
+@@ -0,0 +1,105 @@
 +<script lang="ts">
 +	// LOCAL PATCH (agent-hub fork, E7): renders a Claude AskUserQuestion as interactive option cards
 +	// and POSTs the user's choice to /api/agent/answer (→ owui-claude /answer → resolves the turn).
@@ -653,7 +653,7 @@ index 0000000..cc84218
 +			answers[qText(q)] = selections[qi];
 +		});
 +		try {
-+			await fetch(`${WEBUI_API_BASE_URL}/agent/answer`, {
++			const r = await fetch(`${WEBUI_API_BASE_URL}/agent/answer`, {
 +				method: 'POST',
 +				headers: {
 +					'Content-Type': 'application/json',
@@ -661,8 +661,14 @@ index 0000000..cc84218
 +				},
 +				body: JSON.stringify({ id: item.id, answers })
 +			});
-+		} catch (e) {}
-+		removeQuestion(chatId, item.id);
++			if (!r.ok) throw new Error(`answer POST ${r.status}`);
++			removeQuestion(chatId, item.id); // clear the card ONLY once the agent actually received the answer
++		} catch (e) {
++			// CONV-FLOW (#10): keep the card + let the user retry instead of silently losing the answer
++			// (fetch doesn't throw on 4xx/5xx, and the old code removed the card unconditionally).
++			console.error('[AgentQuestion] answer failed:', e);
++			submitting = false;
++		}
 +	};
 +</script>
 +
@@ -1390,10 +1396,10 @@ index cf55bd8..dff14e0 100644
  						on:pointerup|stopPropagation
 diff --git a/src/lib/utils/agentInbox.ts b/src/lib/utils/agentInbox.ts
 new file mode 100644
-index 0000000..a7743f8
+index 0000000..e23d4aa
 --- /dev/null
 +++ b/src/lib/utils/agentInbox.ts
-@@ -0,0 +1,36 @@
+@@ -0,0 +1,41 @@
 +// LOCAL PATCH (agent-hub fork): shared chat-summary store. Exposes a {chat_id -> summary} map
 +// (from /api/inbox — same source as the /inbox page) so the sidebar chat list shows live one-line
 +// summaries under titles. Self-managing: it polls ONLY while something subscribes to it (i.e. while
@@ -1416,11 +1422,16 @@ index 0000000..a7743f8
 +export const chatSummaries = writable<Record<string, string>>({}, (set) => {
 +	if (!browser) return;
 +	let alive = true;
++	// CONV-FLOW (#11): MERGE, don't replace. A summary that is momentarily null while it regenerates would
++	// otherwise drop that chat's key every poll → the sidebar snippet blinks in/out. Keep the last-known
++	// value until a newer one arrives.
++	let acc: Record<string, string> = {};
 +	const tick = async () => {
 +		if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
 +		try {
 +			const m = await fetchSummaries();
-+			if (alive) set(m);
++			acc = { ...acc, ...m };
++			if (alive) set(acc);
 +		} catch (e) {}
 +	};
 +	tick();

@@ -272,6 +272,9 @@ async function* streamTurn(chatId, model, messages, ctx = {}) {
           } catch (te) { console.error("[owui-claude] tool_result render error:", te && te.message || te); }
         }
       } else if (m.type === "result") {
+        // CONV-FLOW (#4): flush any thinking block still open (no content_block_stop arrived before the
+        // result) so its reasoning isn't silently dropped.
+        for (const k of Object.keys(thinking)) { const tk = (thinking[k] || "").trim(); delete thinking[k]; if (tk) yield { content: reasoningCard(tk) }; }
         if (m.session_id) cachePut(conv, m.session_id);
         if (m.usage) yield { usage: m.usage };
         if (m.subtype && m.subtype !== "success" && !streamedText) yield { content: `\n_(${m.subtype})_` };

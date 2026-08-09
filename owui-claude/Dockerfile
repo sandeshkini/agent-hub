@@ -20,3 +20,9 @@ RUN mkdir -p /workspace
 ENV NODE_ENV=production HOME=/root OWUI_CLAUDE_PORT=9212 WORKSPACE=/workspace
 EXPOSE 9212
 CMD ["node", "server.mjs"]
+
+# Pre-create the SDK's config dir OWNED BY node. Without this, bind-mounting a file into
+# /home/node/.claude makes Docker create the parent as root, and the node user then cannot write
+# its own state there -> every tool call dies with
+#   EACCES: permission denied, mkdir '/home/node/.claude/session-env'
+RUN mkdir -p /home/node/.claude && chown -R node:node /home/node/.claude

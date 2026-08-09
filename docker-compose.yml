@@ -114,6 +114,10 @@ services:
     volumes:
       - ${WORKSPACE_HOST:-${HOME}}:${WORKSPACE:-${HOME}}
       - ./ff-state:/ffstate
+      # Share the human's config so the hub agent behaves exactly like their local Claude Code —
+      # same global instructions, same settings, writable both ways.
+      - ${WORKSPACE_HOST:-${HOME}}/.claude/CLAUDE.md:/home/node/.claude/CLAUDE.md
+      - ${WORKSPACE_HOST:-${HOME}}/.claude/settings.json:/home/node/.claude/settings.json
     environment:
       CLAUDE_CODE_OAUTH_TOKEN: "${CLAUDE_CODE_OAUTH_TOKEN}"
       ADAPTER_KEY: "${ADAPTER_KEY}"
@@ -126,6 +130,11 @@ services:
       # HOME must equal the mounted workspace or `~` resolves to an empty dir in the image and the
       # agent concludes it has no filesystem — even though ${WORKSPACE} is mounted read/write.
       HOME: "${WORKSPACE:-${HOME}}"
+      # ...BUT the Agent SDK persists its own state to $HOME/.claude.json, which with HOME=$WORKSPACE
+      # is the human's REAL Claude Code config — it overwrote it with a minimal container-side version
+      # (mcpServers and hasCompletedOnboarding gone), so `claude` on the host started demanding a
+      # fresh login. Pin the SDK's config dir INSIDE the image so it can never clobber the host's.
+      CLAUDE_CONFIG_DIR: "/home/node/.claude"
 
   opencode:
     build: ./opencode

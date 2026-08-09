@@ -69,8 +69,11 @@ for k in ('HERMES_DASH_USER', 'HERMES_DASH_PW_HASH', 'ADAPTER_KEY'):
 # External MCP hub: merge http entries from MCP_SERVERS into mcp_servers (one place -> all agents).
 # Only round-trips YAML when there ARE extra servers (keeps the default byte-identical); guarded on PyYAML.
 try:
+    # Accept BOTH transports. The old filter required `url`, so every stdio entry
+    # (npx-based servers like slack / shopify-dev) was silently dropped for Hermes while the
+    # container adapters got them — same .env, different tool set, no error anywhere.
     extra = [e for e in json.loads(os.environ.get('MCP_SERVERS', '') or '[]')
-             if isinstance(e, dict) and e.get('name') and e.get('url')]
+             if isinstance(e, dict) and e.get('name') and (e.get('url') or e.get('command'))]
 except Exception:
     extra = []
 if extra:
@@ -78,8 +81,13 @@ if extra:
         import yaml
         cfg = yaml.safe_load(s); cfg.setdefault('mcp_servers', {})
         for e in extra:
-            entry = {'url': e['url']}
-            if e.get('headers'): entry['headers'] = e['headers']
+            if e.get('url'):
+                entry = {'url': e['url']}
+                if e.get('headers'): entry['headers'] = e['headers']
+            else:
+                entry = {'command': e['command']}
+                if e.get('args'): entry['args'] = e['args']
+                if e.get('env'): entry['env'] = e['env']
             cfg['mcp_servers'][e['name']] = entry
         s = yaml.safe_dump(cfg, sort_keys=False)
     except Exception as ex:

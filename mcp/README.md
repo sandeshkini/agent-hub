@@ -43,3 +43,40 @@ All MCP tools render as **native tool cards** in OWUI and are usable in Slack vi
 3. Confirm: ask any agent to use a tool from that server — it should appear as a tool card.
 
 Single source of truth — don't hardcode servers in individual adapters.
+
+## Wiring external MCP servers (MCP_SERVERS in `.env`)
+
+One JSON list in `.env` → **every** agent (claude, opencode, hermes) gets it. Each entry is a standard
+MCP server config plus a `name`; it is passed through to the Agent SDK verbatim (minus `name`), and
+`hermes/install.sh` merges the same list into `~/.hermes/config.yaml`.
+
+Servers fall into three classes, and only the first two work headless:
+
+**1. HTTP + a static header — always works.** Preferred. Inline the token; `.env` is gitignored + 0600.
+```json
+{"name":"stoq","type":"http","url":"https://app.stoqapp.com/mcp",
+ "headers":{"Authorization":"Bearer <token>"}}
+```
+
+**2. stdio via `npx` — works in the containers.** The adapter images are node-based, so `npx` resolves.
+```json
+{"name":"slack","type":"stdio","command":"npx","args":["-y","@modelcontextprotocol/server-slack"],
+ "env":{"SLACK_BOT_TOKEN":"xoxb-…","SLACK_TEAM_ID":"T…"}}
+```
+Do **not** wrap a plain HTTP+header server in `mcp-remote` (as `.mcp.json` does for local CLI use) —
+that spawns a subprocess per turn for no benefit. Convert it to form 1 instead.
+
+**3. Interactive OAuth — NOT supported headless.** `linear`, `posthog`, `clickhouse_cloud`, and the
+Google servers authenticate through a browser consent flow. There is no token to inline, and nothing
+in a container can complete the redirect. Options, in order of sanity:
+  - use the service's REST API through a custom tool / the built-in MCP server instead;
+  - run `mcp-remote` **once interactively on the host** so it caches a token under `~/.mcp-auth`, then
+    mount that dir into the adapter and point the entry at the cached profile (fragile — the token
+    expires and nothing re-runs the flow);
+  - skip it.
+
+**4. Needs a host binary** (e.g. `planetscale` → `pscale`): the binary does not exist in the adapter
+image. Either add it to the image, or expose the data another way. Not wired by default.
+
+`strictMcpConfig: true` is set, so the agent loads ONLY these servers — a stray `.mcp.json` inside the
+mounted workspace can never inject an unexpected server.

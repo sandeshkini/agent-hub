@@ -1,8 +1,8 @@
 diff --git a/backend/open_webui/main.py b/backend/open_webui/main.py
-index 55613ac..798b2cf 100644
+index 55613ac..48b71a0 100644
 --- a/backend/open_webui/main.py
 +++ b/backend/open_webui/main.py
-@@ -138,6 +138,10 @@ from open_webui.models.models import Models
+@@ -138,6 +138,11 @@ from open_webui.models.models import Models
  from open_webui.models.users import Users
  from open_webui.routers import (
      analytics,
@@ -10,10 +10,11 @@ index 55613ac..798b2cf 100644
 +    agent_nodes,  # LOCAL PATCH (agent-hub fork): multi-machine node registry (E4/E5)
 +    agent_answer,  # LOCAL PATCH (agent-hub fork): AskUserQuestion answer relay (E7)
 +    agent_terminal_sync,  # LOCAL PATCH (agent-hub fork): cross-device terminal-session sync
++    agent_runs,  # LOCAL PATCH (agent-hub fork, Phase 1): run/question presence registry
      audio,
      auths,
      automations,
-@@ -822,6 +826,12 @@ if ENABLE_ADMIN_ANALYTICS:
+@@ -822,6 +827,13 @@ if ENABLE_ADMIN_ANALYTICS:
  app.include_router(utils.router, prefix='/api/v1/utils', tags=['utils'])
  app.include_router(terminals.router, prefix='/api/v1/terminals', tags=['terminals'])
  app.include_router(automations.router, prefix='/api/v1/automations', tags=['automations'])
@@ -23,6 +24,7 @@ index 55613ac..798b2cf 100644
 +app.include_router(agent_nodes.router, prefix='/api/v1/nodes', tags=['nodes'])  # LOCAL PATCH
 +app.include_router(agent_answer.router, prefix='/api/v1/agent', tags=['agent'])  # LOCAL PATCH (E7)
 +app.include_router(agent_terminal_sync.router, prefix='/api/v1/terminal-sessions', tags=['terminals'])  # LOCAL PATCH
++app.include_router(agent_runs.router, prefix='/api/v1/agent-runs', tags=['agent'])  # LOCAL PATCH (Phase 1)
  app.include_router(calendar.router, prefix='/api/v1/calendars', tags=['calendars'])
  
  # SCIM 2.0 API for identity management
@@ -515,6 +517,104 @@ index 0000000..52453d6
 +        raise HTTPException(status_code=403, detail="admin only")
 +    existed = _nodes.pop(node_id, None) is not None
 +    return {"deleted": existed}
+diff --git a/backend/open_webui/routers/agent_runs.py b/backend/open_webui/routers/agent_runs.py
+new file mode 100644
+index 0000000..67402fc
+--- /dev/null
++++ b/backend/open_webui/routers/agent_runs.py
+@@ -0,0 +1,92 @@
++# LOCAL PATCH (agent-hub fork, Phase 1): agent run / question PRESENCE registry.
++#
++# Purpose: make it visible, hub-wide, what every agent is doing — and stop a blocked run from becoming
++# an invisible dead-end. It is an IN-MEMORY store, per chat_id (like the node registry), holding:
++#   - status: running | needs-input | done | failed   (the "running" dot on sidebar/inbox rows)
++#   - question: a PARKED AskUserQuestion {id, message_id, questions}  — persisted so it survives a browser
++#     reload and is discoverable even when the blocked chat isn't the open one.
++#
++# Writers = the adapters (machine-to-machine, Bearer ADAPTER_KEY): they heartbeat status and park/clear
++# the pending question. Reader = the browser (JWT): polls GET / for dots + "needs input" badges, and
++# hydrates the question card on chat open. A question is cleared when answered (agent_answer) or when the
++# run reports done/failed. Stateless + best-effort: if this is empty, the UI simply shows no presence.
++import hmac
++import os
++import time
++
++from fastapi import APIRouter, Depends, HTTPException, Request
++
++from open_webui.utils.auth import get_verified_user
++
++router = APIRouter()
++
++ADAPTER_KEY = os.environ.get("ADAPTER_KEY", "")
++DONE_TTL = 45        # keep a done/failed run visible briefly (for the toast/anim) then drop
++STALE_TTL = 1800     # drop a run with no heartbeat after 30 min (crashed adapter, lost turn)
++
++# chat_id -> { status, model, updated_at, question: {id, message_id, questions} | None }
++_runs: dict = {}
++
++
++def _adapter_ok(request: Request) -> bool:
++    # SECURITY (fail-CLOSED): empty ADAPTER_KEY denies; constant-time compare.
++    if not ADAPTER_KEY:
++        return False
++    h = request.headers.get("authorization", "")
++    tok = h[7:].strip() if h.lower().startswith("bearer ") else ""
++    return hmac.compare_digest(tok, ADAPTER_KEY)
++
++
++def _prune(now: float | None = None) -> None:
++    now = now or time.time()
++    drop = []
++    for cid, r in _runs.items():
++        age = now - r.get("updated_at", 0)
++        if age > STALE_TTL:
++            drop.append(cid)
++        elif r.get("status") in ("done", "failed") and not r.get("question") and age > DONE_TTL:
++            drop.append(cid)
++    for cid in drop:
++        _runs.pop(cid, None)
++
++
++@router.post("/")
++async def set_run(request: Request):
++    """Adapters report a run's status and park/clear its pending question (machine-to-machine)."""
++    if not _adapter_ok(request):
++        raise HTTPException(status_code=401, detail="unauthorized")
++    try:
++        body = await request.json()
++    except Exception:
++        raise HTTPException(status_code=400, detail="invalid json")
++    cid = (body.get("chat_id") or "").strip()
++    if not cid:
++        raise HTTPException(status_code=400, detail="chat_id required")
++    now = time.time()
++    r = _runs.get(cid) or {}
++    if "status" in body:
++        r["status"] = body.get("status")
++    if "model" in body:
++        r["model"] = body.get("model")
++    if "question" in body:                 # {id, message_id, questions} to park, or null/None to clear
++        r["question"] = body.get("question")
++    r["updated_at"] = now
++    _runs[cid] = r
++    _prune(now)
++    return {"ok": True}
++
++
++@router.get("/")
++async def list_runs(user=Depends(get_verified_user)):
++    """Browser: current run presence + any parked questions, keyed by chat_id."""
++    now = time.time()
++    _prune(now)
++    return {
++        cid: {
++            "status": r.get("status"),
++            "model": r.get("model"),
++            "question": r.get("question"),
++            "updated_at": int(r.get("updated_at", 0)),
++        }
++        for cid, r in _runs.items()
++    }
 diff --git a/backend/open_webui/routers/agent_terminal_sync.py b/backend/open_webui/routers/agent_terminal_sync.py
 new file mode 100644
 index 0000000..3ad82bf

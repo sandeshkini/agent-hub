@@ -852,7 +852,7 @@ index 28654d6..7bec24d 100644
  	$: if (
  		selectedTag !== undefined ||
 diff --git a/src/lib/components/chat/XTerminal.svelte b/src/lib/components/chat/XTerminal.svelte
-index ce1eda9..542fd5e 100644
+index ce1eda9..df1de8f 100644
 --- a/src/lib/components/chat/XTerminal.svelte
 +++ b/src/lib/components/chat/XTerminal.svelte
 @@ -1,5 +1,5 @@
@@ -874,19 +874,21 @@ index ce1eda9..542fd5e 100644
  
  	let terminalEl: HTMLDivElement;
  	let term: Terminal | null = null;
-@@ -23,6 +25,11 @@
+@@ -22,6 +24,13 @@
+ 	export let connecting = false;
  	let resizeObserver: ResizeObserver | null = null;
  	let pingInterval: ReturnType<typeof setInterval> | null = null;
- 
++	let onTouchStart: ((e: TouchEvent) => void) | null = null; // LOCAL PATCH (mobile drag-scroll)
++	let onTouchMove: ((e: TouchEvent) => void) | null = null;
++
 +	// LOCAL PATCH: live-update font size + refit
 +	$: if (term && fontSize) {
 +		try { (term as any).options.fontSize = fontSize; fitAddon?.fit(); } catch (e) {}
 +	}
-+
+ 
  	// Resolve the active terminal server's info for the WebSocket URL
  	const getTerminalInfo = (): { serverId: string; baseUrl: string } | null => {
- 		// System terminal (admin-configured, has an `id`)
-@@ -173,7 +180,7 @@
+@@ -173,7 +182,7 @@
  
  		term = new Terminal({
  			cursorBlink: true,
@@ -895,16 +897,32 @@ index ce1eda9..542fd5e 100644
  			fontFamily:
  				"'JetBrains Mono', 'Fira Code', 'Cascadia Code', Menlo, Monaco, 'Courier New', monospace",
  			theme: {
-@@ -209,6 +216,8 @@
+@@ -209,6 +218,24 @@
  		term.loadAddon(new WebLinksAddon());
  
  		term.open(terminalEl);
 +		// LOCAL PATCH: surface the terminal's OSC title (cwd/command) to the parent
 +		try { term.onTitleChange((t) => dispatch('title', t)); } catch (e) {}
++
++		// LOCAL PATCH (mobile): drag up/down to scroll the scrollback. xterm.js doesn't touch-scroll
++		// its viewport on iOS, so translate a vertical finger-drag into term.scrollLines().
++		let _ty = 0;
++		onTouchStart = (e: TouchEvent) => { _ty = e.touches[0]?.clientY ?? 0; };
++		onTouchMove = (e: TouchEvent) => {
++			const y = e.touches[0]?.clientY ?? _ty;
++			const dy = _ty - y;
++			if (term && Math.abs(dy) >= 2) {
++				term.scrollLines(dy > 0 ? Math.ceil(dy / 18) : -Math.ceil(-dy / 18));
++				_ty = y;
++				e.preventDefault(); // stop the page from rubber-banding while scrolling the shell
++			}
++		};
++		terminalEl.addEventListener('touchstart', onTouchStart, { passive: true });
++		terminalEl.addEventListener('touchmove', onTouchMove, { passive: false });
  
  		// Fit after a frame so the container has dimensions
  		requestAnimationFrame(() => {
-@@ -258,6 +267,12 @@
+@@ -258,6 +285,12 @@
  		// handler would write a spurious "[Connection closed]" message.
  	};
  
@@ -917,6 +935,31 @@ index ce1eda9..542fd5e 100644
  	// Reconnect when the selected terminal changes
  	$: if ($selectedTerminalId !== undefined && term) {
  		// Clear the terminal screen and reconnect to the new server
+@@ -274,6 +307,8 @@
+ 
+ 	onDestroy(() => {
+ 		disconnect();
++		if (terminalEl && onTouchStart) terminalEl.removeEventListener('touchstart', onTouchStart);
++		if (terminalEl && onTouchMove) terminalEl.removeEventListener('touchmove', onTouchMove);
+ 		resizeObserver?.disconnect();
+ 		term?.dispose();
+ 		term = null;
+@@ -281,6 +316,15 @@
+ 	});
+ </script>
+ 
++<style>
++	/* LOCAL PATCH (mobile): let the xterm viewport scroll with momentum + contain overscroll. */
++	:global(.xterm-viewport) {
++		-webkit-overflow-scrolling: touch;
++		overscroll-behavior: contain;
++		touch-action: pan-y;
++	}
++</style>
++
+ <div class="h-full min-h-0 relative">
+ 	<div bind:this={terminalEl} class="absolute inset-0 px-0.5" class:pointer-events-none={overlay} />
+ </div>
 diff --git a/src/lib/components/layout/Sidebar.svelte b/src/lib/components/layout/Sidebar.svelte
 index f8ac62b..009cfdc 100644
 --- a/src/lib/components/layout/Sidebar.svelte
@@ -1800,10 +1843,10 @@ index 0000000..cfed3cc
 +</div>
 diff --git a/src/routes/(app)/terminal/+page.svelte b/src/routes/(app)/terminal/+page.svelte
 new file mode 100644
-index 0000000..6dde1ec
+index 0000000..6065425
 --- /dev/null
 +++ b/src/routes/(app)/terminal/+page.svelte
-@@ -0,0 +1,180 @@
+@@ -0,0 +1,201 @@
 +<script lang="ts">
 +	// LOCAL PATCH (agent-hub fork): dedicated Terminal page. Sessions are managed in the LEFT SIDEBAR
 +	// (shared store $lib/utils/agentTerminals — inbox-ready); this page renders the active shell
@@ -1811,7 +1854,7 @@ index 0000000..6dde1ec
 +	// Auto-titles sessions from the terminal's OSC title (cwd/command). No chat/model.
 +	// The Files panel reuses OWUI's native FileNav against the aibo terminal server's file-API
 +	// (/files/*), scoped to the active session's cwd via chatId.
-+	import { onMount, getContext } from 'svelte';
++	import { onMount, onDestroy, getContext } from 'svelte';
 +	import { get } from 'svelte/store';
 +	import { terminalServers, selectedTerminalId, showSidebar, mobile } from '$lib/stores';
 +	import {
@@ -1862,6 +1905,8 @@ index 0000000..6dde1ec
 +	};
 +
 +	// LOCAL PATCH (mobile key bar): a soft-key row for keys mobile keyboards lack (Esc, Ctrl-C, arrows…).
++	// Trimmed to what fits one row (flex-filled, no horizontal scroll); symbols like | ~ / are on the
++	// iOS keyboard's .?123 layer already.
 +	let xterm: any;
 +	const KEYS = [
 +		{ label: 'Esc', seq: '\x1b' },
@@ -1873,12 +1918,20 @@ index 0000000..6dde1ec
 +		{ label: '←', seq: '\x1b[D' },
 +		{ label: '↑', seq: '\x1b[A' },
 +		{ label: '↓', seq: '\x1b[B' },
-+		{ label: '→', seq: '\x1b[C' },
-+		{ label: '|', seq: '|' },
-+		{ label: '~', seq: '~' },
-+		{ label: '/', seq: '/' }
++		{ label: '→', seq: '\x1b[C' }
 +	];
 +	const key = (seq: string) => xterm?.sendKey?.(seq);
++
++	// iOS: the on-screen keyboard overlays the layout viewport, so a bottom bar hides behind it.
++	// Track the visual viewport and lift the bar by the keyboard height so it sits just above it.
++	let kbOffset = 0;
++	let vvHeight = 0;
++	const onViewport = () => {
++		const vv = (window as any).visualViewport;
++		if (!vv) return;
++		vvHeight = Math.round(vv.height);
++		kbOffset = Math.max(0, Math.round(window.innerHeight - vv.height - vv.offsetTop));
++	};
 +
 +	onMount(async () => {
 +		try { fontSize = Number(localStorage.getItem(FS_KEY)) || 13; } catch (e) {}
@@ -1895,12 +1948,22 @@ index 0000000..6dde1ec
 +		if (t?.id) { selectedTerminalId.set(t.id); hasServer = true; }
 +		await ensureTerminalSession();
 +		loaded = true;
++		const vv = (window as any).visualViewport;
++		if (vv) { vv.addEventListener('resize', onViewport); vv.addEventListener('scroll', onViewport); onViewport(); }
++	});
++
++	onDestroy(() => {
++		const vv = (window as any).visualViewport;
++		if (vv) { vv.removeEventListener('resize', onViewport); vv.removeEventListener('scroll', onViewport); }
 +	});
 +</script>
 +
 +<svelte:head><title>{$i18n.t('Terminal')}</title></svelte:head>
 +
-+<div class="h-full w-full flex flex-col overflow-hidden">
++<!-- LOCAL PATCH (iOS): when the keyboard is up, pin the page to the VISIBLE viewport so the key bar
++	 (and terminal) sit above the keyboard instead of behind it. -->
++<div class="w-full flex flex-col overflow-hidden {kbOffset > 8 ? '' : 'h-full'}"
++	style={kbOffset > 8 ? `height:${vvHeight}px` : ''}>
 +	<div class="flex items-center gap-1.5 px-2 py-1.5 border-b border-gray-50 dark:border-gray-850 shrink-0">
 +		{#if $mobile && !$showSidebar}
 +			<button class="p-1.5 shrink-0 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-900"
@@ -1973,10 +2036,11 @@ index 0000000..6dde1ec
 +
 +	<!-- LOCAL PATCH (mobile key bar): soft keys for what mobile keyboards lack. Mobile only, when connected. -->
 +	{#if $mobile && loaded && hasServer && $activeTerminalId}
-+		<div class="shrink-0 flex items-center gap-1 overflow-x-auto scrollbar-hidden px-1.5 py-1 border-t border-gray-100 dark:border-gray-850 bg-gray-50 dark:bg-gray-900">
++		<div class="shrink-0 flex items-stretch gap-1 px-1.5 py-1.5 border-t border-gray-200 dark:border-gray-800 bg-gray-100 dark:bg-gray-900"
++			style="padding-bottom: calc(0.375rem + env(safe-area-inset-bottom, 0px));">
 +			{#each KEYS as k}
 +				<button
-+					class="shrink-0 min-w-[2.1rem] px-2 py-1.5 rounded-md text-xs font-medium text-gray-700 dark:text-gray-200 bg-white dark:bg-gray-850 border border-gray-200 dark:border-gray-800 active:bg-gray-200 dark:active:bg-gray-700"
++					class="flex-1 min-w-0 py-2 rounded-md text-sm font-medium text-gray-700 dark:text-gray-100 bg-white dark:bg-gray-850 border border-gray-200 dark:border-gray-700 active:bg-gray-200 dark:active:bg-gray-700"
 +					on:mousedown|preventDefault={() => key(k.seq)}
 +					on:touchstart|preventDefault={() => key(k.seq)}
 +				>{k.label}</button>

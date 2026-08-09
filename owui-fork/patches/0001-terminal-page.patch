@@ -519,10 +519,10 @@ index 0000000..52453d6
 +    return {"deleted": existed}
 diff --git a/backend/open_webui/routers/agent_runs.py b/backend/open_webui/routers/agent_runs.py
 new file mode 100644
-index 0000000..67402fc
+index 0000000..5ddeff4
 --- /dev/null
 +++ b/backend/open_webui/routers/agent_runs.py
-@@ -0,0 +1,92 @@
+@@ -0,0 +1,96 @@
 +# LOCAL PATCH (agent-hub fork, Phase 1): agent run / question PRESENCE registry.
 +#
 +# Purpose: make it visible, hub-wide, what every agent is doing — and stop a blocked run from becoming
@@ -547,7 +547,11 @@ index 0000000..67402fc
 +
 +ADAPTER_KEY = os.environ.get("ADAPTER_KEY", "")
 +DONE_TTL = 45        # keep a done/failed run visible briefly (for the toast/anim) then drop
-+STALE_TTL = 1800     # drop a run with no heartbeat after 30 min (crashed adapter, lost turn)
++# Drop a run with no heartbeat this long. Adapters heartbeat every ~25s DURING a turn (empty-patch touch),
++# so a live turn stays fresh and a KILLED turn (adapter restart / dropped SSE) goes stale fast — otherwise
++# it shows a false "running" spinner in the sidebar while the Inbox (real chat state) says done. Keep this
++# comfortably above the adapter heartbeat interval (25s) so a slow turn is never falsely pruned.
++STALE_TTL = int(os.environ.get("AGENT_RUN_STALE_TTL", "90"))
 +
 +# chat_id -> { status, model, updated_at, question: {id, message_id, questions} | None }
 +_runs: dict = {}

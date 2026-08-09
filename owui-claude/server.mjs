@@ -17,8 +17,10 @@ const MCP_TOOLS_URL = process.env.MCP_TOOLS_URL || "http://mcp-tools:8000/mcp"; 
 // Add Linear/custom/etc. once; every agent gets it. See mcp/README.md.
 const EXTRA_MCP = (() => { try { return JSON.parse(process.env.MCP_SERVERS || "[]"); } catch { return []; } })();
 const WORKSPACE = process.env.WORKSPACE || homedir() + "/.owui-claude-workspace";
-const DEFAULT_MODEL = process.env.CLAUDE_MODEL || "claude-sonnet-4-5";
-const MODELS = (process.env.CLAUDE_MODELS || "claude-sonnet-4-5,claude-opus-4-1").split(",").map(s => s.trim()).filter(Boolean);
+// Defaults are only used if CLAUDE_MODEL(S) is unset in .env. The SDK also accepts future-proof aliases
+// (`sonnet`/`opus`/`haiku`/`default`) that auto-resolve to the latest tier — see supportedModels().
+const DEFAULT_MODEL = process.env.CLAUDE_MODEL || "claude-sonnet-5";
+const MODELS = (process.env.CLAUDE_MODELS || "claude-sonnet-5,claude-opus-5,claude-haiku-4-5").split(",").map(s => s.trim()).filter(Boolean);
 if (!existsSync(WORKSPACE)) mkdirSync(WORKSPACE, { recursive: true });
 
 // never let a stray rejection/exception kill the whole adapter
@@ -201,6 +203,12 @@ async function* streamTurn(chatId, model, messages, ctx = {}) {
   }
   if (sys && typeof prompt === "string") prompt = sys + "\n\n" + prompt;   // persona instructions
   if (chatId) postRun(chatId, { status: "running", model: model || DEFAULT_MODEL });   // Phase-1 presence: turn started
+  // Keepalive heartbeat: an EMPTY patch just bumps the run's updated_at (preserving status, incl. needs-input).
+  // This keeps a LONG turn alive past the registry's STALE_TTL, and makes a KILLED turn (adapter restart /
+  // dropped SSE) go stale FAST — otherwise it shows a false "running" spinner in the sidebar for STALE_TTL
+  // while the Inbox (real chat state) says done. Cleared in finally.
+  const heartbeat = chatId ? setInterval(() => postRun(chatId, {}), 25000) : null;
+  if (heartbeat && heartbeat.unref) heartbeat.unref();
   // Permissions are gated by canUseTool below — it IS the SDK's permission callback, so there is no
   // separate interactive prompt that could hang a headless OWUI turn. canUseTool (a) enforces the
   // destructive-command guardrail and (b) drives interactive AskUserQuestion (emit a socket event →
@@ -272,6 +280,14 @@ async function* streamTurn(chatId, model, messages, ctx = {}) {
   }
   if (sys) opts.appendSystemPrompt = sys;                                   // also as a real system prompt (covers image turns)
   if (resume) opts.resume = resume;
+  // ── optional tuning (env-gated; UNSET = SDK defaults, so behavior is unchanged unless you configure it) ──
+  if (process.env.CLAUDE_EFFORT) opts.effort = process.env.CLAUDE_EFFORT.trim();                                  // low|medium|high|xhigh|max — reasoning depth
+  if (process.env.CLAUDE_THINKING_TOKENS) opts.thinking = { type: "enabled", budgetTokens: Number(process.env.CLAUDE_THINKING_TOKENS) };
+  else if ((process.env.CLAUDE_THINKING || "").trim() === "adaptive") opts.thinking = { type: "adaptive" };       // let the model size its own thinking
+  if (process.env.CLAUDE_MAX_TURNS) opts.maxTurns = Number(process.env.CLAUDE_MAX_TURNS);                          // safety cap on agent loop length
+  if (process.env.CLAUDE_MAX_BUDGET_USD) opts.maxBudgetUsd = Number(process.env.CLAUDE_MAX_BUDGET_USD);            // hard spend cap per turn
+  if (process.env.CLAUDE_FALLBACK_MODEL) opts.fallbackModel = process.env.CLAUDE_FALLBACK_MODEL.trim();            // used if the primary is overloaded
+  opts.stderr = (d) => { const s = String(d || "").trim(); if (s) console.error("[owui-claude][sdk]", s.slice(0, 500)); };  // surface SDK/CLI stderr in the journal
 
   // STREAMING-INPUT MODE (background-subagent fix): drive the SDK with an async-iterable prompt kept OPEN
   // past the first `result`, so background subagents / `run_in_background` tasks can finish and their
@@ -324,8 +340,30 @@ async function* streamTurn(chatId, model, messages, ctx = {}) {
         liveBg = (m.tasks || []).length;
         if (liveBg > 0) { usedBackground = true; drainPending = false; }
       }
-      else if (m.type === "system" && (m.subtype === "task_notification" || m.subtype === "task_progress")) {
-        drainPending = false;   // a background task finished/progressed; the SDK re-invokes the model to use it
+      else if (m.type === "system" && m.subtype === "task_started") {
+        // a subagent/background task launched — show it so the fan-out is visible in chat.
+        usedBackground = true; drainPending = false;
+        yield { content: `\n_↳ subagent started${m.subagent_type ? ` (${m.subagent_type})` : ""}${m.description ? `: ${m.description}` : ""}_\n` };
+      }
+      else if (m.type === "system" && m.subtype === "task_notification") {
+        // a background task finished; the SDK re-invokes the model to use its result.
+        drainPending = false;
+        const icon = m.status === "completed" ? "✓" : m.status === "failed" ? "✗" : "◦";
+        yield { content: `\n_${icon} subagent ${m.status || "done"}${m.summary ? `: ${m.summary}` : ""}_\n` };
+      }
+      else if (m.type === "system" && m.subtype === "task_progress") { drainPending = false; }   // periodic — kept silent (too frequent)
+      else if (m.type === "system" && m.subtype === "compact_boundary") {
+        yield { content: `\n_🗜 context compacted (older history summarized to fit the window)_\n` };
+      }
+      else if (m.type === "system" && m.subtype === "permission_denied") {
+        yield { content: `\n_🚫 a tool call was denied (policy/guardrail)_\n` };
+      }
+      else if (m.type === "system" && (m.subtype === "informational" || m.subtype === "notification")) {
+        const lvl = m.level || "info"; const msg = m.message || m.text || "";
+        if ((lvl === "warning" || lvl === "notice") && msg) yield { content: `\n_⚠️ ${String(msg).slice(0, 300)}_\n` };
+      }
+      else if (m.type === "system" && m.subtype === "rate_limit") {
+        yield { content: `\n_⏳ rate limit reached — the SDK is backing off and will retry…_\n` };
       }
       else if (m.type === "stream_event") {
         const ev = m.event;
@@ -384,7 +422,16 @@ async function* streamTurn(chatId, model, messages, ctx = {}) {
         for (const k of Object.keys(thinking)) { const tk = (thinking[k] || "").trim(); delete thinking[k]; if (tk) yield { content: reasoningCard(tk) }; }
         if (m.session_id) cachePut(conv, m.session_id);
         if (m.usage) yield { usage: m.usage };
-        if (m.subtype && m.subtype !== "success" && !streamedText) yield { content: `\n_(${m.subtype})_` };
+        // Surface a clear reason on a non-success turn end (always, not only when no text streamed).
+        if (m.subtype && m.subtype !== "success") {
+          const why = {
+            error_max_turns: "hit the max-turns limit",
+            error_max_budget_usd: "hit the spend budget",
+            error_during_execution: "hit an execution error",
+            error_max_structured_output_retries: "could not produce valid structured output",
+          }[m.subtype] || m.subtype;
+          yield { content: `\n\n_⚠️ turn ended: ${why} — resend to continue._\n` };
+        }
         // BACKGROUND-SUBAGENT FIX: a `result` ends a TURN, not necessarily the whole run.
         if (liveBg > 0) {
           // background subagents still running — wait (the SDK re-invokes the model as each one reports).
@@ -401,6 +448,7 @@ async function* streamTurn(chatId, model, messages, ctx = {}) {
     console.error("[owui-claude] streamTurn error:", e && e.stack || e && e.message || e);   // never swallow silently
     yield { content: `\n\n_⚠️ Claude adapter hiccup (${String(e && e.message || e).slice(0, 200)}). Partial result is above — resend to continue._` };
   } finally {
+    if (heartbeat) clearInterval(heartbeat);   // stop the presence keepalive
     try { finishInput(); } catch {}   // close the streaming-input session so query() shuts down cleanly
     // interrupt ONLY if the turn didn't finish (client aborted). On normal completion the
     // process is already gone and interrupt() rejects — catch that (it's a promise, not a throw).

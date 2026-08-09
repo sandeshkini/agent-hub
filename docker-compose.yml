@@ -111,9 +111,18 @@ services:
     ports:
       - "${ADAPTER_BIND:-127.0.0.1}:9212:9212"
     user: "${DOCKER_USER:-1000:1000}"
+    # SYSTEM ACCESS: the hub agent should operate the box like the human's local Claude Code. It gets
+    # the whole $HOME mounted rw (files) AND the docker socket (drive the docker/compose stack). group_add
+    # = the HOST's docker group gid (aibo=984; set DOCKER_GID per machine) so the non-root user can use
+    # the socket. NOTE: docker.sock is root-equivalent on the host — the bash guardrail (canUseTool +
+    # PreToolUse) still blocks destructive shell, but docker itself is powerful; this is deliberate
+    # ("full host access, guardrail retained"). It does NOT grant host systemctl (that needs host exec).
+    group_add:
+      - "${DOCKER_GID:-984}"
     volumes:
       - ${WORKSPACE_HOST:-${HOME}}:${WORKSPACE:-${HOME}}
       - ./ff-state:/ffstate
+      - /var/run/docker.sock:/var/run/docker.sock     # operate the docker/compose stack
       # Share the human's config so the hub agent behaves exactly like their local Claude Code —
       # same global instructions, same settings, writable both ways.
       - ${WORKSPACE_HOST:-${HOME}}/.claude/CLAUDE.md:/home/node/.claude/CLAUDE.md

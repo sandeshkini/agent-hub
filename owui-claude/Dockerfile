@@ -4,9 +4,15 @@
 # ANTHROPIC_API_KEY.
 FROM node:22-bookworm-slim
 
-# git + ripgrep are used by Claude Code's tools; ca-certificates for TLS.
+# git + ripgrep for Claude Code's tools; ca-certificates for TLS; curl for the agent's own network
+# checks; jq/less/procps/iproute2 are staples the agent reaches for; the static docker CLI so the hub
+# agent can operate the docker/compose stack (the host socket is bind-mounted in compose).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      git ripgrep ca-certificates \
+      git ripgrep ca-certificates curl jq less procps iproute2 \
+    && ARCH=$(dpkg --print-architecture) \
+    && case "$ARCH" in amd64) DA=x86_64;; arm64) DA=aarch64;; *) DA=x86_64;; esac \
+    && curl -fsSL "https://download.docker.com/linux/static/stable/$DA/docker-27.3.1.tgz" \
+       | tar -xz -C /usr/local/bin --strip-components=1 docker/docker \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

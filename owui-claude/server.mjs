@@ -186,12 +186,17 @@ function htmlAttr(s) {
 }
 // Build the markup OWUI renders as a NATIVE tool card ("✓ View Result from <name>", expandable to
 // args+result). Verified via screenshot that OWUI renders <details type="tool_calls"> from stored content.
+// Renderer-scale guards: OWUI's markdown/tool-card renderer degrades badly on a huge message (a turn with
+// dozens of big tool results → hundreds of KB → it dumps raw markup instead of collapsing cards). Keep each
+// card lean and cap how many FULL cards a single turn emits (see the user/tool_result branch).
+const TOOLCARD_MAX = Number(process.env.CLAUDE_TOOLCARD_MAX || 2000);   // per-card result truncation (chars)
+const TOOLCARD_CAP = Number(process.env.CLAUDE_TOOLCARD_CAP || 40);     // max full cards per turn; extras become one-liners
 function toolCard(name, argsJson, resultText, isError) {
   let res = resultText || "";
-  // FIX(bug2): neutralize backticks (-> U+02BB) BEFORE truncation so a ``` near the 4000-char
-  // cut can't break the HTML attribute/fence (same approach as owui-hermes _fence()).
+  // FIX(bug2): neutralize backticks (-> U+02BB) BEFORE truncation so a ``` near the cut can't break the
+  // HTML attribute/fence (same approach as owui-hermes _fence()).
   res = res.replace(/`/g, "ʻ");
-  if (res.length > 4000) res = res.slice(0, 4000) + "\n…(truncated)";
+  if (res.length > TOOLCARD_MAX) res = res.slice(0, TOOLCARD_MAX) + "\n…(truncated)";
   return `\n<details type="tool_calls" done="true" name="${htmlAttr(name)}" arguments="${htmlAttr(argsJson || "{}")}" result="${htmlAttr(JSON.stringify(res))}"${isError ? ' error="true"' : ""}>\n<summary>Tool Executed</summary>\n</details>\n`;
 }
 // FIX(bug1): render accumulated thinking text as a collapsible OWUI reasoning block.
@@ -323,7 +328,7 @@ async function* streamTurn(chatId, model, messages, ctx = {}) {
   try { q = query({ prompt: streamingInput(), options: opts }); }
   catch (e) { yield { content: `\n_Claude adapter error: ${e && e.message || e}_` }; return; }
 
-  let streamedText = "", tool = {}, toolJson = {}, toolQueue = [], pendingTools = {}, completed = false;
+  let streamedText = "", tool = {}, toolJson = {}, toolQueue = [], pendingTools = {}, completed = false, toolCardCount = 0;
   let thinking = {};   // FIX(bug1): per-block accumulator for thinking_delta text
   // ── background-subagent drain state (streaming-input fix) ──
   const BG_DRAIN_GRACE_MS = Number(process.env.CLAUDE_BG_DRAIN_GRACE_MS || 4000);   // after tasks drain, wait this long for the model's follow-up synthesis turn before finalizing
@@ -433,8 +438,16 @@ async function* streamTurn(chatId, model, messages, ctx = {}) {
             const pt = pendingTools[b.tool_use_id] || {};
             const name = pt.name || toolQueue.shift() || "tool";
             if (b.tool_use_id) delete pendingTools[b.tool_use_id];
-            // Native OWUI tool card (collapsible "View Result from <name>", expands to args + result).
-            yield { content: toolCard(name, pt.input, txt, b.is_error) };
+            toolCardCount++;
+            if (toolCardCount <= TOOLCARD_CAP) {
+              // Native OWUI tool card (collapsible "View Result from <name>", expands to args + result).
+              yield { content: toolCard(name, pt.input, txt, b.is_error) };
+            } else {
+              // Renderer-scale guard: past the cap, collapse further tool results to a safe one-liner so a
+              // huge exploration turn (dozens of tool calls) can't produce an unrenderable message.
+              const preview = (txt || "").replace(/[`<>\n*_|]+/g, " ").trim().slice(0, 80);
+              yield { content: `\n_↳ ${name} ✓${preview ? " — " + preview : ""} (result collapsed — this turn has ${toolCardCount} tool calls)_\n` };
+            }
           } catch (te) { console.error("[owui-claude] tool_result render error:", te && te.message || te); }
         }
       } else if (m.type === "result") {

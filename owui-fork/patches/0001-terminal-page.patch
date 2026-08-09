@@ -1459,10 +1459,10 @@ index 0000000..b5b9113
 +}
 diff --git a/src/lib/utils/agentTerminals.ts b/src/lib/utils/agentTerminals.ts
 new file mode 100644
-index 0000000..c10baf0
+index 0000000..3e1e89d
 --- /dev/null
 +++ b/src/lib/utils/agentTerminals.ts
-@@ -0,0 +1,239 @@
+@@ -0,0 +1,247 @@
 +// LOCAL PATCH (agent-hub fork): shared terminal-session store — now CROSS-DEVICE SYNCED.
 +// Terminal sessions live in the left sidebar (like chats) and drive the /terminal page. The list is
 +// cached in localStorage for instant paint AND persisted server-side (fork `/api/v1/terminal-sessions`)
@@ -1567,6 +1567,14 @@ index 0000000..c10baf0
 +	} catch {}
 +};
 +
++// Friendly label for a discovered shell from the server-reported {cwd, cmd}: prefer "cmd · dir"
++// (e.g. "claude · restock"), else the cwd's last segment, else a short id fallback.
++const terminalLabel = (s: any): string => {
++	const dir = s?.cwd ? String(s.cwd).replace(/\/+$/, '').split('/').pop() || String(s.cwd) : '';
++	if (s?.cmd) return dir && dir !== '~' ? `${s.cmd} · ${dir}` : String(s.cmd);
++	return dir || 'Shell ' + String(s?.id ?? '').slice(-4);
++};
++
 +// LOCAL PATCH (cross-machine terminal discovery): the sync store above only lists shells opened through
 +// THIS hub. But live PTYs on each machine's terminal server may have been started elsewhere (another
 +// device, the machine's own UI, an agent). Ask every terminal server for its live sessions and merge
@@ -1590,7 +1598,7 @@ index 0000000..c10baf0
 +				if (!s?.id) continue;
 +				found.push({
 +					id: s.id,
-+					name: 'Shell ' + String(s.id).slice(-4),
++					name: terminalLabel(s),
 +					createdAt: Date.now(),
 +					serverId: srv.id,
 +					discovered: true

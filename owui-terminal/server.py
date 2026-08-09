@@ -11,10 +11,58 @@ Built fresh (PTY techniques from claude-monitor, not coupled). Env: PORT(7681) T
 TERMINAL_SHELL(/bin/bash) TERMINAL_CWD REPLAY_BYTES(262144) IDLE_TTL(3600)
 """
 import asyncio, json, os, pty, fcntl, termios, struct, signal, secrets, time
-import shutil, io, zipfile, mimetypes, hmac
+import shutil, io, zipfile, mimetypes, hmac, subprocess
 from aiohttp import web, WSMsgType
 
 HOME = os.path.expanduser("~")
+
+# ── friendly session labels (for cross-machine terminal discovery in the hub sidebar) ──
+# list_sessions reports each shell's cwd + foreground command so the UI can show "claude · restock"
+# instead of "Shell 6c72". Cross-platform: /proc on Linux, lsof/ps on macOS. Cached ~3s per session.
+_SHELLS = {"bash", "sh", "zsh", "fish", "login", "tmux", "screen", "dash"}
+
+
+def _proc_cwd(pid):
+    try:
+        return os.readlink(f"/proc/{pid}/cwd")                      # Linux
+    except Exception:
+        pass
+    try:                                                            # macOS / BSD
+        out = subprocess.run(["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
+                             capture_output=True, text=True, timeout=2).stdout
+        for ln in out.splitlines():
+            if ln.startswith("n"):
+                return ln[1:]
+    except Exception:
+        pass
+    return None
+
+
+def _fg_cmd(fd):
+    """The foreground command running in the PTY (what the user is actually doing), or None if it's just the shell."""
+    try:
+        pgrp = os.tcgetpgrp(fd)
+        out = subprocess.run(["ps", "-o", "comm=", "-p", str(pgrp)],
+                             capture_output=True, text=True, timeout=2).stdout.strip()
+        cmd = os.path.basename(out.split()[0]) if out else ""
+        cmd = cmd.lstrip("-")
+        if cmd and cmd not in _SHELLS:
+            return cmd
+    except Exception:
+        pass
+    return None
+
+
+def _session_meta(s):
+    now = time.monotonic()
+    if getattr(s, "_meta_ts", 0) and now - s._meta_ts < 3:
+        return s._meta
+    cwd = _proc_cwd(s.pid)
+    if cwd and cwd.startswith(HOME):
+        cwd = "~" + cwd[len(HOME):]                                 # collapse $HOME → ~
+    m = {"cwd": cwd, "cmd": _fg_cmd(s.fd)}
+    s._meta, s._meta_ts = m, now
+    return m
 
 # SECURITY: confine the HTTP file API to a root (default HOME). The interactive shell stays unrestricted
 # (that's its purpose, and it's token-gated); the file API is the high-blast-radius surface (single-call
@@ -225,7 +273,7 @@ async def list_sessions(request):
     if not _bearer_ok(request):
         return web.json_response({"error": "unauthorized"}, status=401)
     return web.json_response({"sessions": [
-        {"id": sid, "clients": len(s.clients)} for sid, s in sessions.items() if s.alive
+        {"id": sid, "clients": len(s.clients), **_session_meta(s)} for sid, s in sessions.items() if s.alive
     ]})
 
 

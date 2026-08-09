@@ -33,7 +33,9 @@ services:
       # an existing volume flip it in Admin Settings → General instead.
       ENABLE_API_KEYS: "${ENABLE_API_KEYS:-true}"
       # local adapters (hermes/claude/opencode) + optional remote-node connections appended via MB_* (E10.7)
-      OPENAI_API_BASE_URLS: "http://owui-hermes:9211/v1;http://owui-claude:9212/v1;http://owui-opencode:9213/v1${MB_OPENAI_URLS:-}"
+      # owui-claude runs on the HOST (systemd --user owui-claude.service) for FULL system access
+      # (systemctl, all drives, host processes) — parity with local Claude Code. Reached via host-gateway.
+      OPENAI_API_BASE_URLS: "http://owui-hermes:9211/v1;http://host.docker.internal:9212/v1;http://owui-opencode:9213/v1${MB_OPENAI_URLS:-}"
       OPENAI_API_KEYS: "${ADAPTER_KEY};${ADAPTER_KEY};${ADAPTER_KEY}${MB_OPENAI_KEYS:-}"
       OPENAI_API_CONFIGS: "${MB_OPENAI_CONFIGS:-{}}"   # per-connection cfg (prefix_id for remote nodes → mb.*)
       # RESILIENCE (E10.7): remote nodes (MacBook) are laptops that sleep. Bound the per-connection
@@ -41,7 +43,7 @@ services:
       # 500-ing the hub page. Local adapters answer in <100ms; only a dead remote hits this cap.
       AIOHTTP_CLIENT_TIMEOUT_MODEL_LIST: "5"
       ADAPTER_KEY: "${ADAPTER_KEY}"                # E7: /api/agent/answer proxies to owui-claude with this
-      CLAUDE_ADAPTER_URL: "http://owui-claude:9212"
+      CLAUDE_ADAPTER_URL: "http://host.docker.internal:9212"   # host-run claude adapter (full system access)
       ENABLE_FORWARD_USER_INFO_HEADERS: "true"   # forwards X-OpenWebUI-Chat-Id -> session continuity
       ENABLE_OLLAMA_API: "true"
       OLLAMA_BASE_URL: "http://ollama:11434"
@@ -75,7 +77,6 @@ services:
       TERMINAL_SERVER_CONNECTIONS: "${TERMINAL_SERVERS_JSON:-[{\"id\":\"${TERMINAL_ID:-aibo}\",\"name\":\"${TERMINAL_NAME:-aibo (host shell)}\",\"url\":\"http://host.docker.internal:7681\",\"auth_type\":\"bearer\",\"key\":\"${TERMINAL_TOKEN}\",\"enabled\":true,\"access_control\":null}]}"
     depends_on:
       - owui-hermes
-      - owui-claude
       - owui-opencode
     networks:
       - default
@@ -106,7 +107,9 @@ services:
     build: ./owui-claude
     image: agent-hub/owui-claude
     container_name: owui-claude
-    profiles: ["hub", "node"]                      # runs on both hub and worker nodes
+    # HUB (aibo) runs claude on the HOST instead (systemd --user owui-claude.service) for full system
+    # access — so the container is NODE-only now (the MacBook still uses it until it migrates too).
+    profiles: ["node"]
     restart: unless-stopped
     # Share the host PID namespace so the agent can actually SEE the host for a real health check
     # (host processes, not just its own 5). Pairs with the docker socket below; set AGENT_PID_HOST= blank

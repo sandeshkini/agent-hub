@@ -35,7 +35,7 @@ services:
       # local adapters (hermes/claude/opencode) + optional remote-node connections appended via MB_* (E10.7)
       # owui-claude runs on the HOST (systemd --user owui-claude.service) for FULL system access
       # (systemctl, all drives, host processes) — parity with local Claude Code. Reached via host-gateway.
-      OPENAI_API_BASE_URLS: "http://owui-hermes:9211/v1;http://host.docker.internal:9212/v1;http://owui-opencode:9213/v1${MB_OPENAI_URLS:-}"
+      OPENAI_API_BASE_URLS: "http://owui-hermes:9211/v1;http://host.docker.internal:9212/v1;http://host.docker.internal:9213/v1${MB_OPENAI_URLS:-}"
       OPENAI_API_KEYS: "${ADAPTER_KEY};${ADAPTER_KEY};${ADAPTER_KEY}${MB_OPENAI_KEYS:-}"
       OPENAI_API_CONFIGS: "${MB_OPENAI_CONFIGS:-{}}"   # per-connection cfg (prefix_id for remote nodes → mb.*)
       # RESILIENCE (E10.7): remote nodes (MacBook) are laptops that sleep. Bound the per-connection
@@ -87,7 +87,6 @@ services:
       TERMINAL_SERVER_CONNECTIONS: "${TERMINAL_SERVERS_JSON:-[{\"id\":\"${TERMINAL_ID:-aibo}\",\"name\":\"${TERMINAL_NAME:-aibo (host shell)}\",\"url\":\"http://host.docker.internal:7681\",\"auth_type\":\"bearer\",\"key\":\"${TERMINAL_TOKEN}\",\"enabled\":true,\"access_control\":null}]}"
     depends_on:
       - owui-hermes
-      - owui-opencode
     networks:
       - default
       - apps
@@ -166,7 +165,7 @@ services:
     build: ./opencode
     image: agent-hub/opencode
     container_name: opencode
-    profiles: ["hub", "node"]
+    profiles: ["node"]                             # HUB (aibo) runs `opencode serve` on the HOST (full access)
     restart: unless-stopped
     expose:
       - "4096"
@@ -184,7 +183,7 @@ services:
     build: ./owui-opencode
     image: agent-hub/owui-opencode
     container_name: owui-opencode
-    profiles: ["hub", "node"]
+    profiles: ["node"]                             # HUB runs the opencode adapter on the HOST (full access)
     restart: unless-stopped
     ports:
       - "${ADAPTER_BIND:-127.0.0.1}:9213:9213"

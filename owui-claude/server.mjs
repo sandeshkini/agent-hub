@@ -84,6 +84,11 @@ function makeCanUseTool(chatId, ctx) {
       // proceed even if unanswered/timeout (empty answers) rather than hang the turn
       return { behavior: "allow", updatedInput: { questions: input.questions, answers: answers || {} } };
     }
+    if (tool === "AskUserQuestion") {
+      // Non-interactive (fire-and-forget / raw API): no browser is attached to answer, and letting the
+      // tool run would hang the turn. Deny with guidance so the model proceeds on its best default.
+      return { behavior: "deny", message: "No interactive user is available to answer — proceed with your best default and continue without asking." };
+    }
     return { behavior: "allow", updatedInput: input };
   };
 }
@@ -151,19 +156,19 @@ async function* streamTurn(chatId, model, messages, ctx = {}) {
   // another's Claude session (cross-conversation context leak). No chat id ⇒ fresh session, no resume.
   const conv = chatId ? "id:" + chatId : null;
   const resume = conv ? cacheGet(conv) : undefined;
-  // Permissions: this adapter is driven by OWUI, where nobody can answer an interactive permission
-  // prompt — an unanswered one hangs the turn forever. Skip the SDK's prompting entirely.
+  // Permissions are gated by canUseTool below — it IS the SDK's permission callback, so there is no
+  // separate interactive prompt that could hang a headless OWUI turn. canUseTool (a) enforces the
+  // destructive-command guardrail and (b) drives interactive AskUserQuestion (emit a socket event →
+  // await the user's tap → return the answers). NOTE: do NOT set permissionMode:"bypassPermissions" —
+  // it SKIPS canUseTool entirely, which silently broke AskUserQuestion (it rendered as a raw tool card).
   const opts = {
     canUseTool: makeCanUseTool(chatId, ctx),
     cwd: WORKSPACE,
     includePartialMessages: true,
     model: model || DEFAULT_MODEL,
-    permissionMode: "bypassPermissions",
-    allowDangerouslySkipPermissions: true,   // required by the SDK when bypassing
     additionalDirectories: [WORKSPACE, "/tmp"],
-    // bypassPermissions skips canUseTool entirely, which would silently drop the destructive-command
-    // guardrail. PreToolUse hooks still fire under bypass, so enforce it here — deterministic block,
-    // not model judgement. $WORKSPACE is the real host home mounted rw, so this is the only backstop.
+    // Belt-and-suspenders: the guardrail is ALSO a PreToolUse hook (fires regardless of permission mode).
+    // $WORKSPACE is the real host home mounted rw, so this deterministic block matters.
     hooks: {
       PreToolUse: [{
         hooks: [async (input) => {

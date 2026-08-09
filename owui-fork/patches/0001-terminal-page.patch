@@ -392,10 +392,10 @@ index 0000000..80eaf61
 +    return out
 diff --git a/backend/open_webui/routers/agent_nodes.py b/backend/open_webui/routers/agent_nodes.py
 new file mode 100644
-index 0000000..eed014f
+index 0000000..52453d6
 --- /dev/null
 +++ b/backend/open_webui/routers/agent_nodes.py
-@@ -0,0 +1,112 @@
+@@ -0,0 +1,119 @@
 +# LOCAL PATCH (agent-hub fork): E4/E5 multi-machine node registry.
 +# A faithful port of the `dispatch` hub into the OWUI backend. Each machine ("node") runs an
 +# agent-hub-node bundle (adapter fleet + owui-terminal) that self-registers here on a heartbeat.
@@ -415,9 +415,12 @@ index 0000000..eed014f
 +
 +router = APIRouter()
 +
-+# Shared machine-to-machine secret for register/heartbeat. If unset, registration is open
-+# (single-host/dev). Set NODE_HUB_TOKEN in the OWUI env to require it in production.
++# Shared machine-to-machine secret for register/heartbeat. Registration MUTATES where the hub forwards
++# chat/terminal traffic (a rogue register could point a model's machine at an attacker-controlled host),
++# and the hub is internet-exposed — so this is FAIL-CLOSED: with no NODE_HUB_TOKEN, registration is
++# refused unless ALLOW_OPEN_NODE_REG=true is deliberately set (LAN/dev only).
 +NODE_HUB_TOKEN = os.environ.get("NODE_HUB_TOKEN", "").strip()
++ALLOW_OPEN_NODE_REG = os.environ.get("ALLOW_OPEN_NODE_REG", "").strip().lower() in ("1", "true", "yes")
 +
 +OFFLINE_TTL = 90        # seconds without a heartbeat -> shown offline
 +EVICT_TTL = 3600        # seconds without a heartbeat -> dropped from the registry
@@ -462,7 +465,11 @@ index 0000000..eed014f
 +
 +@router.post("/register")
 +async def register_node(request: Request):
-+    if NODE_HUB_TOKEN and _bearer(request) != NODE_HUB_TOKEN:
++    if not NODE_HUB_TOKEN:
++        if not ALLOW_OPEN_NODE_REG:
++            raise HTTPException(status_code=503,
++                detail="node registration disabled: set NODE_HUB_TOKEN (or ALLOW_OPEN_NODE_REG=true for dev)")
++    elif _bearer(request) != NODE_HUB_TOKEN:
 +        raise HTTPException(status_code=401, detail="bad node hub token")
 +    try:
 +        body = await request.json()
@@ -1570,10 +1577,10 @@ index 0000000..aa55061
 +};
 diff --git a/src/lib/utils/machineSelector.ts b/src/lib/utils/machineSelector.ts
 new file mode 100644
-index 0000000..c027323
+index 0000000..c37ab96
 --- /dev/null
 +++ b/src/lib/utils/machineSelector.ts
-@@ -0,0 +1,117 @@
+@@ -0,0 +1,128 @@
 +// LOCAL PATCH (agent-hub fork, E4): machine (node) selector state.
 +// Reads the fork node registry (/api/nodes) — the source of truth for which machines exist, which
 +// models each serves, and each machine's terminal server. Selecting a machine scopes BOTH the chat
@@ -1662,10 +1669,21 @@ index 0000000..c027323
 +	null
 +);
 +
-+// The node that serves a given model id (exact match against each node's advertised model list).
++// The node that serves a given model id. OWUI stores remote-connection models as `<prefix>.<id>`
++// (e.g. `mb.claude-sonnet-5`), but a node's advertised list may carry either the prefixed id or the
++// bare id. Match exactly first, then fall back to comparing on the bare suffix so attribution still
++// resolves if the two forms disagree (otherwise every remote chat mis-attributes to the hub node).
++const bareModel = (m: string): string => (m || '').replace(/^[a-z0-9-]+\./i, '');
 +export function machineForModel(modelId: string | null | undefined, nodesList: Node[]): Node | null {
 +	if (!modelId) return null;
-+	return nodesList.find((n) => Array.isArray(n.models) && n.models.includes(modelId)) ?? null;
++	const exact = nodesList.find((n) => Array.isArray(n.models) && n.models.includes(modelId));
++	if (exact) return exact;
++	const target = bareModel(modelId);
++	return (
++		nodesList.find(
++			(n) => Array.isArray(n.models) && n.models.some((m) => m === target || bareModel(m) === target)
++		) ?? null
++	);
 +}
 +
 +// The node that owns a given terminal-server id (each node advertises terminal.id).

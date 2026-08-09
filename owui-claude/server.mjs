@@ -146,8 +146,11 @@ async function* streamTurn(chatId, model, messages, ctx = {}) {
   const sys = systemOf(messages);
   let prompt = buildPrompt(um);
   if (sys && typeof prompt === "string") prompt = sys + "\n\n" + prompt;   // persona instructions
-  const conv = chatId ? "id:" + chatId : "h:" + textOf(um.content).slice(0, 40);
-  const resume = cacheGet(conv);
+  // Resume ONLY when we have a stable chat id. The old content-prefix fallback ("h:"+first-40-chars)
+  // collided across unrelated conversations that shared an opening phrase → one chat could resume
+  // another's Claude session (cross-conversation context leak). No chat id ⇒ fresh session, no resume.
+  const conv = chatId ? "id:" + chatId : null;
+  const resume = conv ? cacheGet(conv) : undefined;
   const opts = { canUseTool: makeCanUseTool(chatId, ctx), cwd: WORKSPACE, includePartialMessages: true, model: model || DEFAULT_MODEL };
   // shared MCP tools (publish_artifact + notify) — same server all agents use; calls render as native cards.
   // strictMcpConfig: load ONLY this MCP server (ignore any host/project .mcp.json so the agent doesn't
@@ -307,18 +310,33 @@ const FF_DIR = process.env.FF_STATE_DIR || "/ffstate";
 let FF_ON = false;
 try { mkdirSync(FF_DIR, { recursive: true }); FF_ON = true; } catch { FF_ON = false; }
 const ffFile = (cid, mid) => `${FF_DIR}/claude__${Buffer.from(`${cid}|${mid}`).toString("hex")}.json`;
-function ffWrite(rec) { if (!FF_ON) return; try { writeFileSync(ffFile(rec.cid, rec.mid), JSON.stringify(rec)); } catch {} }
+// SAFETY: bound auto-resume so a run that crash-loops the adapter can't re-execute forever.
+const FF_TTL_MS = Number(process.env.FF_TTL_SEC || 1800) * 1000;   // drop interrupted runs older than this
+const FF_MAX_ATTEMPTS = Number(process.env.FF_MAX_ATTEMPTS || 2);  // at most N auto-resumes
+function ffWrite(rec) { if (!FF_ON) return; try { if (rec.ts == null) rec.ts = Date.now(); if (rec.attempts == null) rec.attempts = 0; writeFileSync(ffFile(rec.cid, rec.mid), JSON.stringify(rec)); } catch {} }
 function ffClear(cid, mid) { if (!FF_ON) return; try { unlinkSync(ffFile(cid, mid)); } catch {} }
 async function recoverFF() {
   if (!FF_ON) return;
   let files = [];
   try { files = readdirSync(FF_DIR).filter(f => f.startsWith("claude__") && f.endsWith(".json")); } catch { return; }
+  const now = Date.now();
   for (const f of files) {
     const p = `${FF_DIR}/${f}`;
     let rec; try { rec = JSON.parse(readFileSync(p, "utf8")); } catch { try { unlinkSync(p); } catch {} continue; }
+    // SAFETY: refuse stale / already-retried runs (prevents destructive re-execution loops).
+    const age = now - Number(rec.ts || now);
+    const attempts = Number(rec.attempts || 0);
+    if (age > FF_TTL_MS || attempts >= FF_MAX_ATTEMPTS) {
+      console.log(`[owui-claude] FF4: dropping stale/exhausted run cid=${rec.cid} (age=${Math.round(age/1000)}s attempts=${attempts})`);
+      try { unlinkSync(p); } catch {}
+      continue;
+    }
     const mirror = new Mirror(rec.cid, rec.mid, rec.jwt);
     if (!mirror.on) { try { unlinkSync(p); } catch {} continue; }
-    console.log(`[owui-claude] FF4: re-issuing interrupted run cid=${rec.cid}`);
+    // Persist the incremented attempt BEFORE re-issuing (crash-safe bound).
+    rec.attempts = attempts + 1;
+    try { writeFileSync(p, JSON.stringify(rec)); } catch {}
+    console.log(`[owui-claude] FF4: re-issuing interrupted run cid=${rec.cid} (attempt ${attempts + 1}/${FF_MAX_ATTEMPTS})`);
     let full = "_↻ Auto-resumed after an adapter restart._\n\n";
     try {
       await mirror.done(full);

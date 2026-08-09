@@ -160,18 +160,35 @@ def stream_turn(chat_id, model, messages, sink=None):
     conv_lk = _conv_lock(chat_key)
     conv_lk.acquire()
     try:
-        sid = _get_session(chat_key)
-        if not sid:
-            yield {"content": "_opencode: could not create a session._"}
+        # A cached session id can be stale if opencode restarted/evicted it → POST /session/{sid}/message
+        # 404s and the chat is permanently broken. Drop the cached id and recreate ONCE (mirrors the
+        # hermes recreate-on-error path), so a dead session self-heals instead of poisoning the chat.
+        for attempt in range(2):
+            sid = _get_session(chat_key)
+            if not sid:
+                yield {"content": "_opencode: could not create a session._"}
+                return
+            if isinstance(sink, dict):     # FIX (1): expose sid for abort
+                sink["sid"] = sid
+            gone = {"v": False}
+            yield from _stream_turn_locked(sid, model_id, text, _sys, gone)
+            if gone["v"] and attempt == 0:
+                with _sess_lock:           # drop only if still the same stale sid
+                    if _sessions.get(chat_key) == sid:
+                        _sessions.pop(chat_key, None)
+                print(f"[owui-opencode] session {sid} gone; recreating for chat_key={chat_key}", flush=True)
+                continue
             return
-        if isinstance(sink, dict):     # FIX (1): expose sid for abort
-            sink["sid"] = sid
-        yield from _stream_turn_locked(sid, model_id, text, _sys)
     finally:
         conv_lk.release()
 
 
-def _stream_turn_locked(sid, model_id, text, _sys):
+def _is_session_gone(err_str):
+    """A POST error that means the upstream opencode session no longer exists (restart/eviction)."""
+    e = (err_str or "").lower()
+    return "404" in e or "not found" in e or "no such session" in e or "unknown session" in e
+
+def _stream_turn_locked(sid, model_id, text, _sys, gone=None):
 
     # 1) open the global event stream BEFORE posting (so we miss no deltas)
     try:
@@ -245,6 +262,9 @@ def _stream_turn_locked(sid, model_id, text, _sys):
                 break
             if now > idle_deadline:
                 if post_result.get("err"):
+                    if gone is not None and not got_text and _is_session_gone(post_result["err"]):
+                        gone["v"] = True     # stale upstream session — recreate & retry
+                        break
                     yield {"content": f"\n_opencode error: {post_result['err'][:300]}_"}
                 elif not got_text:
                     yield {"content": "\n_⏱ no output; ending._"}
@@ -253,6 +273,9 @@ def _stream_turn_locked(sid, model_id, text, _sys):
                 o = q.get(timeout=1)
             except queue.Empty:
                 if post_result.get("done") and post_result.get("err") and not got_text:
+                    if gone is not None and _is_session_gone(post_result["err"]):
+                        gone["v"] = True     # stale upstream session — let the caller recreate & retry
+                        break                # (suppress the error text; the retry will produce output)
                     yield {"content": f"\n_opencode error: {post_result['err'][:300]}_"}
                     break
                 if time.monotonic() - last_beat > HEARTBEAT_EVERY:

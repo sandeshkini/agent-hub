@@ -67,6 +67,11 @@ class Mirror:
 # Persist each mirrored run so an adapter restart mid-run can re-issue it and still land the
 # result in the OWUI message. Guarded: if FF_STATE_DIR is unavailable, everything is a no-op.
 FF_DIR = os.getenv("FF_STATE_DIR", "/ffstate")
+# SAFETY: bound re-execution. These agents can be destructive (computer-use / host shell), so a run
+# that crashes the adapter mid-resume must NOT be re-issued forever. Drop records older than FF_TTL,
+# and cap re-issue attempts (the attempt is persisted BEFORE running, so a hard crash can't reset it).
+FF_TTL = float(os.getenv("FF_TTL_SEC", "1800"))          # 30 min: older interrupted runs are stale, drop
+FF_MAX_ATTEMPTS = int(os.getenv("FF_MAX_ATTEMPTS", "2"))  # at most N auto-resumes before giving up
 try:
     os.makedirs(FF_DIR, exist_ok=True)
     FF_ON = True
@@ -82,6 +87,8 @@ def ff_write(tag, rec):
     if not FF_ON:
         return
     try:
+        rec.setdefault("ts", time.time())      # stamp for TTL
+        rec.setdefault("attempts", 0)          # bound auto-resume
         with open(_ff_path(tag, rec["cid"], rec["mid"]), "w") as f:
             json.dump(rec, f)
     except Exception:
@@ -102,10 +109,20 @@ def ff_recover(tag, run):
     we mirror the cumulative content into the original OWUI message, then drop the record."""
     if not FF_ON:
         return
+    now = time.time()
     for p in glob.glob(os.path.join(FF_DIR, f"{tag}__*.json")):
         try:
             rec = json.load(open(p))
         except Exception:
+            try: os.remove(p)
+            except Exception: pass
+            continue
+        # SAFETY: refuse to re-run stale or already-retried runs — prevents a crash-looping turn from
+        # re-executing (possibly destructive) work on every restart.
+        age = now - float(rec.get("ts") or now)
+        attempts = int(rec.get("attempts") or 0)
+        if age > FF_TTL or attempts >= FF_MAX_ATTEMPTS:
+            print(f"[{tag}] FF4: dropping stale/exhausted run cid={rec.get('cid')} (age={int(age)}s attempts={attempts})", flush=True)
             try: os.remove(p)
             except Exception: pass
             continue
@@ -114,7 +131,13 @@ def ff_recover(tag, run):
             try: os.remove(p)
             except Exception: pass
             continue
-        print(f"[{tag}] FF4: re-issuing interrupted run cid={rec.get('cid')}", flush=True)
+        # Persist the incremented attempt BEFORE re-issuing, so a hard crash during the resume can't
+        # reset the counter (at-most FF_MAX_ATTEMPTS total, crash-safe).
+        rec["attempts"] = attempts + 1
+        try:
+            with open(p, "w") as f: json.dump(rec, f)
+        except Exception: pass
+        print(f"[{tag}] FF4: re-issuing interrupted run cid={rec.get('cid')} (attempt {attempts + 1}/{FF_MAX_ATTEMPTS})", flush=True)
         full = "_↻ Auto-resumed after an adapter restart._\n\n"
         try:
             m.done(full)

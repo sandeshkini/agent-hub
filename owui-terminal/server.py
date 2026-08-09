@@ -90,8 +90,13 @@ class Session:
 
     def resize(self, cols, rows):
         try:
-            fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", int(rows), int(cols), 0, 0))
-        except (OSError, TypeError, ValueError):
+            # clamp to the u16 range TIOCSWINSZ expects; struct.error (out-of-range) would otherwise
+            # escape the handler and tear down the WS, letting a client drop its own session with one
+            # crafted resize.
+            c = max(1, min(65535, int(cols)))
+            r = max(1, min(65535, int(rows)))
+            fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", r, c, 0, 0))
+        except (OSError, TypeError, ValueError, struct.error):
             pass
 
     def close(self, exited=False):
@@ -111,8 +116,17 @@ class Session:
                 os.kill(self.pid, signal.SIGKILL)
             except Exception:
                 pass
+        # Reap the child. A single waitpid(WNOHANG) right after SIGKILL usually returns (0,0) because
+        # the kernel hasn't delivered the signal yet → the child lingers as a <defunct> zombie forever,
+        # leaking a PID slot per session close. Retry briefly until it's actually reaped.
         try:
-            os.waitpid(self.pid, os.WNOHANG)
+            for _ in range(50):                       # up to ~0.5s
+                pid, _st = os.waitpid(self.pid, os.WNOHANG)
+                if pid:
+                    break
+                time.sleep(0.01)
+        except ChildProcessError:
+            pass                                      # already reaped (e.g. SIGCHLD elsewhere)
         except Exception:
             pass
         sessions.pop(self.sid, None)
@@ -294,6 +308,8 @@ async def fs_read(request):
             return web.json_response({"error": "file too large to preview"}, status=413)
         with open(p, "r", encoding="utf-8", errors="replace") as f:
             return web.json_response({"content": f.read()})
+    except PermissionError as ex:                       # jail escape → 403, consistent with fs_list/view/mkdir
+        return web.json_response({"error": str(ex)}, status=403)
     except Exception as ex:
         return web.json_response({"error": str(ex)}, status=400)
 

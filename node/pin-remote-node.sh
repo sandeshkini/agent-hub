@@ -13,22 +13,27 @@
 set -u
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_FILE="$DIR/.env"
-# strip a trailing " # comment" and trailing whitespace (matches setup.sh's getenv), so a commented
-# PINNED_NODES_JSON line doesn't break json.loads and silently drop every node.
+# getenv: for simple SCALAR values — strips a trailing " # comment" + trailing whitespace.
 getenv() { grep -E "^$1=" "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2- | sed -E 's/[[:space:]]+#.*$//; s/[[:space:]]+$//'; }
+# getenv_raw: for JSON values — JSON legitimately contains '#' (labels, url fragments), and the '#'-comment
+# strip above would truncate it mid-string → json.loads fails → every node silently dropped. Only trim
+# trailing whitespace here; never treat '#' as a comment.
+getenv_raw() { grep -E "^$1=" "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2- | sed -E 's/[[:space:]]+$//'; }
 HUB_URL="${OWUI_URL:-http://localhost:3000}/api/v1/nodes/register"
 INTERVAL="${PIN_INTERVAL:-45}"
 
 echo "[pin] pinning remote nodes -> $HUB_URL every ${INTERVAL}s"
 while true; do
   HUB_TOKEN="$(getenv NODE_HUB_TOKEN)"
-  PINNED="$(getenv PINNED_NODES_JSON)"
+  PINNED="$(getenv_raw PINNED_NODES_JSON)"
   HUB_URL="$HUB_URL" HUB_TOKEN="$HUB_TOKEN" python3 - "$PINNED" <<'PY'
 import os, sys, json, urllib.request
 hub = os.environ["HUB_URL"]; tok = os.environ.get("HUB_TOKEN", "")
 try:
     nodes = json.loads(sys.argv[1] or "[]")
-except Exception:
+except Exception as e:
+    # Loud: a malformed PINNED_NODES_JSON would otherwise drop EVERY node with no trace.
+    sys.stderr.write(f"[pin] ERROR: PINNED_NODES_JSON is not valid JSON ({e}); no nodes registered this tick\n")
     nodes = []
 for n in nodes:
     health, payload = n.get("health"), n.get("payload")

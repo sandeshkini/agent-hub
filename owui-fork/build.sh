@@ -42,4 +42,15 @@ if [ "${1:-}" = "--check" ]; then echo "OK: all patches apply cleanly."; exit 0;
 
 echo "== docker build $IMAGE =="
 docker build -t "$IMAGE" "$UP"
+
+# GUARD: docker's COPY layer cache has been observed serving a STALE copy of the source — a fork file's
+# new content silently didn't land in the image, shipping an old build that looked successful. Verify a
+# fork-added file inside the image matches the freshly-patched tree; if not, rebuild without cache.
+SENTINEL="backend/open_webui/routers/agent_nodes.py"
+want="$(sha1sum "$UP/$SENTINEL" 2>/dev/null | cut -d' ' -f1)"
+have="$(docker run --rm --entrypoint sh "$IMAGE" -c "sha1sum /app/$SENTINEL 2>/dev/null | cut -d' ' -f1" 2>/dev/null)"
+if [ -n "$want" ] && [ "$want" != "$have" ]; then
+  echo "!! image source is STALE (docker COPY cache served old content) — rebuilding --no-cache"
+  docker build --no-cache -t "$IMAGE" "$UP"
+fi
 echo "== built $IMAGE =="

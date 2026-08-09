@@ -1294,21 +1294,22 @@ index f8ac62b..438b735 100644
  										selected={selectedChatId === chat.id}
  										on:select={() => {
 diff --git a/src/lib/components/layout/Sidebar/ChatItem.svelte b/src/lib/components/layout/Sidebar/ChatItem.svelte
-index 3e9602b..8b1f07a 100644
+index 3e9602b..6c3ad96 100644
 --- a/src/lib/components/layout/Sidebar/ChatItem.svelte
 +++ b/src/lib/components/layout/Sidebar/ChatItem.svelte
-@@ -18,6 +18,10 @@
+@@ -18,6 +18,11 @@
  	import { toast } from 'svelte-sonner';
  	import { goto, invalidate, invalidateAll } from '$app/navigation';
  	import { onMount, getContext, createEventDispatcher, tick } from 'svelte';
 +	import { chatSummaries } from '$lib/utils/agentInbox'; // LOCAL PATCH
++	import { agentRuns } from '$lib/utils/agentRuns'; // LOCAL PATCH (Phase 1): running / needs-input presence
 +	// LOCAL PATCH (E10): machine attribution chip (which machine this chat ran on).
 +	import { nodes, hubNode, machineForModel, machineIdForModel } from '$lib/utils/machineSelector';
 +	import MachineChip from './MachineChip.svelte';
  	import { LinkPreview } from 'bits-ui';
  	import {
  		archiveChatById,
-@@ -81,6 +85,14 @@
+@@ -81,6 +86,14 @@
  
  	export let onDragEnd = () => {};
  
@@ -1323,7 +1324,7 @@ index 3e9602b..8b1f07a 100644
  	function formatTimeAgo(timestamp: number): string {
  		const now = Date.now();
  		const diff = now - timestamp * 1000; // timestamp is in seconds
-@@ -131,7 +143,9 @@
+@@ -131,7 +144,9 @@
  		id !== $chatId &&
  		!active &&
  		(effectiveReadAt === null || (updatedAt !== null && updatedAt > effectiveReadAt));
@@ -1334,7 +1335,7 @@ index 3e9602b..8b1f07a 100644
  
  	const loadChat = async () => {
  		if (!chat) {
-@@ -608,13 +622,23 @@
+@@ -608,13 +623,36 @@
  							<div class="size-1.5 bg-sky-500 rounded-full"></div>
  						</div>
  					{/if}
@@ -1346,14 +1347,27 @@ index 3e9602b..8b1f07a 100644
 -					>
 -						{title}
 +					<div class="flex flex-col flex-1 min-w-0 justify-center">  <!-- LOCAL PATCH: title + summary -->
-+						<div
-+							dir="auto"
-+							class="text-left overflow-hidden w-full truncate {unread
-+								? 'font-normal text-gray-800 dark:text-gray-200'
-+								: ''} {showInlineActions && !readonly ? 'pr-12' : ''}"
-+						>
-+							{title}
++						<div class="flex items-center gap-1.5 min-w-0">
++							<!-- LOCAL PATCH (Phase 1): live presence — running (green pulse) / needs-input (amber) dot -->
++							{#if $agentRuns[id]?.status === 'running'}
++								<span class="size-1.5 shrink-0 rounded-full bg-green-500 animate-pulse" title={$i18n.t('Running')}></span>
++							{:else if $agentRuns[id]?.status === 'needs-input' || $agentRuns[id]?.question}
++								<span class="size-1.5 shrink-0 rounded-full bg-amber-500" title={$i18n.t('Needs input')}></span>
++							{/if}
++							<div
++								dir="auto"
++								class="text-left overflow-hidden flex-1 min-w-0 truncate {unread
++									? 'font-normal text-gray-800 dark:text-gray-200'
++									: ''} {showInlineActions && !readonly ? 'pr-12' : ''}"
++							>
++								{title}
++							</div>
 +						</div>
++						{#if $agentRuns[id]?.status === 'needs-input' || $agentRuns[id]?.question}
++							<div class="mt-0.5">
++								<span class="inline-flex items-center text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-500">{$i18n.t('Needs input')}</span>
++							</div>
++						{/if}
 +						{#if $chatSummaries[id]}
 +							<!-- LOCAL PATCH: show the full summary (status line, capped ~140 chars server-side) -->
 +							<div class="text-xs text-gray-400 dark:text-gray-500 leading-snug break-words whitespace-normal">{$chatSummaries[id]}</div>
@@ -1568,6 +1582,60 @@ index 0000000..b5b9113
 +export function removeQuestion(chatId: string, id: string) {
 +	agentQuestions.update((m) => ({ ...m, [chatId]: (m[chatId] ?? []).filter((x) => x.id !== id) }));
 +}
+diff --git a/src/lib/utils/agentRuns.ts b/src/lib/utils/agentRuns.ts
+new file mode 100644
+index 0000000..1fb4952
+--- /dev/null
++++ b/src/lib/utils/agentRuns.ts
+@@ -0,0 +1,48 @@
++// LOCAL PATCH (agent-hub fork, Phase 1): agent run/question PRESENCE.
++// Polls the fork registry (/api/v1/agent-runs) so the sidebar/inbox can show a "running" dot and a
++// "needs input" badge per chat, and — critically — HYDRATES a parked AskUserQuestion into agentQuestions
++// so it survives a page reload and shows up when the user opens the (previously non-active) chat.
++// Also reconciles: when the adapter reports a chat is no longer waiting, clears any stale card.
++import { writable } from 'svelte/store';
++import { browser } from '$app/environment';
++import { WEBUI_API_BASE_URL } from '$lib/constants';
++import { addQuestion, agentQuestions } from './agentQuestions';
++
++export type AgentRun = {
++	status?: 'running' | 'needs-input' | 'done' | 'failed' | string;
++	model?: string;
++	question?: { id: string; message_id?: string; questions: any[] } | null;
++	updated_at?: number;
++};
++
++export const agentRuns = writable<Record<string, AgentRun>>({}, (set) => {
++	if (!browser) return;
++	let alive = true;
++	const tick = async () => {
++		if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
++		try {
++			const r = await fetch(`${WEBUI_API_BASE_URL}/agent-runs/`, {
++				headers: { Authorization: `Bearer ${localStorage.getItem('token') ?? ''}` }
++			});
++			if (!r.ok) return;
++			const runs: Record<string, AgentRun> = await r.json();
++			if (!alive) return;
++			set(runs);
++			// Hydrate parked questions + clear stale ones the registry no longer parks.
++			for (const [cid, run] of Object.entries(runs)) {
++				if (run?.question?.id) {
++					addQuestion(cid, { id: run.question.id, questions: run.question.questions });
++				} else if (run?.status && run.status !== 'needs-input') {
++					// adapter says this chat is no longer waiting (answered / turn ended) → drop any card
++					agentQuestions.update((m) => (m[cid]?.length ? { ...m, [cid]: [] } : m));
++				}
++			}
++		} catch (e) {}
++	};
++	tick();
++	const timer = setInterval(tick, 4000);
++	return () => {
++		alive = false;
++		clearInterval(timer);
++	};
++});
 diff --git a/src/lib/utils/agentTerminals.ts b/src/lib/utils/agentTerminals.ts
 new file mode 100644
 index 0000000..3e1e89d

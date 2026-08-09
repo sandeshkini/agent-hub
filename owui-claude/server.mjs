@@ -65,6 +65,20 @@ async function emitQuestionEvent(chatId, mid, jwt, qid, questions) {
   } catch (e) { console.error("[owui-claude] emit question failed:", e && e.message || e); }
 }
 
+// Phase-1 presence: report a run's status + park/clear its pending question in the fork registry
+// (/api/v1/agent-runs) so the UI can show "running"/"needs input" hub-wide and a parked AskUserQuestion
+// survives a reload / is discoverable when its chat isn't open. Best-effort; never blocks the turn.
+function postRun(chatId, patch) {
+  if (!chatId || !ADAPTER_KEY) return;
+  try {
+    fetch(`${OWUI_BASE}/api/v1/agent-runs/`, {
+      method: "POST",
+      headers: { "Authorization": `Bearer ${ADAPTER_KEY}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId, ...patch }),
+    }).catch(() => {});
+  } catch {}
+}
+
 // Per-turn canUseTool: guardrail always; interactive AskUserQuestion only when a browser is attached
 // (ctx.interactive with mid+jwt). Non-stream / fire-and-forget runs auto-allow (no one to ask).
 function makeCanUseTool(chatId, ctx) {
@@ -75,12 +89,15 @@ function makeCanUseTool(chatId, ctx) {
     if (tool === "AskUserQuestion" && ctx && ctx.interactive && ctx.mid && ctx.jwt && Array.isArray(input?.questions)) {
       const qid = randId();
       await emitQuestionEvent(chatId, ctx.mid, ctx.jwt, qid, input.questions);
+      // Park the question in the registry (survives reload; findable when the chat isn't open).
+      postRun(chatId, { status: "needs-input", question: { id: qid, message_id: ctx.mid, questions: input.questions } });
       ctx.onWait && ctx.onWait();
       const answers = await new Promise((resolve) => {
         const timer = setTimeout(() => { pendingQ.delete(qid); resolve(null); }, ANSWER_TIMEOUT);
         pendingQ.set(qid, { resolve, timer });
       });
       ctx.onResume && ctx.onResume();
+      postRun(chatId, { status: "running", question: null });   // answered/timed out → clear the badge + card
       // proceed even if unanswered/timeout (empty answers) rather than hang the turn
       return { behavior: "allow", updatedInput: { questions: input.questions, answers: answers || {} } };
     }
@@ -183,6 +200,7 @@ async function* streamTurn(chatId, model, messages, ctx = {}) {
     if (prior) prompt = `[Continuing an earlier conversation — the context so far:\n\n${prior}\n\nThe user now says:]\n\n${prompt}`;
   }
   if (sys && typeof prompt === "string") prompt = sys + "\n\n" + prompt;   // persona instructions
+  if (chatId) postRun(chatId, { status: "running", model: model || DEFAULT_MODEL });   // Phase-1 presence: turn started
   // Permissions are gated by canUseTool below — it IS the SDK's permission callback, so there is no
   // separate interactive prompt that could hang a headless OWUI turn. canUseTool (a) enforces the
   // destructive-command guardrail and (b) drives interactive AskUserQuestion (emit a socket event →
@@ -316,6 +334,7 @@ async function* streamTurn(chatId, model, messages, ctx = {}) {
     // interrupt ONLY if the turn didn't finish (client aborted). On normal completion the
     // process is already gone and interrupt() rejects — catch that (it's a promise, not a throw).
     if (!completed) { try { const p = q && q.interrupt && q.interrupt(); if (p && p.catch) p.catch(() => {}); } catch (e) { console.error('[owui-claude] interrupt error:', e); } }   // FIX(bug4): don't swallow silently
+    if (chatId) postRun(chatId, { status: "done", question: null });   // Phase-1 presence: turn ended (also fires on abort/detach-end)
   }
 }
 

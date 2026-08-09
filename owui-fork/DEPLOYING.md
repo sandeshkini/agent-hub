@@ -71,13 +71,31 @@ regen the patch, run `deploy.sh` again. Prod never moved.
 - ✅ If prod ever does white-screen, `./owui-fork/deploy.sh rollback` gets you back to the last image
   immediately, then debug on staging.
 
-## Staging URL (`staging.operator.kingdomofluna.com`)
+## Staging URL (`staging.operator.kingdomofluna.com`) — optional, needs 2 human steps
 
-The staging container binds `127.0.0.1:3001`. To review it off-box it's exposed through Pangolin (VPS
-`root@46.62.218.143`) as `staging.operator.kingdomofluna.com → aibo:3001`. Create/edit that resource via
-the **Pangolin UI/API only** — raw SQL does NOT program gerbil's WireGuard route (CLAUDE.md §4). It sits
-behind the same SSO as prod. If the subdomain isn't up yet, review locally with an SSH tunnel:
-`ssh -L 3001:localhost:3001 aibo` then open `http://localhost:3001/`.
+The staging container binds `127.0.0.1:3001`. **The pipeline is fully usable without this subdomain** —
+review locally with an SSH tunnel:
+
+```bash
+ssh -L 3001:localhost:3001 aibo         # then open http://localhost:3001/
+```
+
+To expose it off-box for phone/visual review, mirror the prod `operator` resource. This needs **two
+manual steps** (no automation possible — the Pangolin dashboard has no API and the Cloudflare dashboard
+is Turnstile-walled with no on-box token; same blocker as the Hermes subdomain):
+
+1. **Cloudflare** → add an A record `staging.operator.kingdomofluna.com` → `46.62.218.143` (proxy OFF /
+   DNS-only), OR a wildcard `*.operator.kingdomofluna.com` → `46.62.218.143`.
+2. **Pangolin dashboard** (`https://pangolin.kinifamily.com`) → site **aibo** (id 1) → *Add Resource*:
+   - Hostname/subdomain: `staging.operator.kingdomofluna.com`
+   - Target: `localhost` port **3001** · SSL on · **SSO on** (same auth as prod)
+   - Add the access grant (role → resource) or you'll get 403 "not allowed".
+   Pangolin programs the gerbil/WireGuard route itself — **do NOT hand-edit `db.sqlite`** (raw SQL does
+   NOT program the WG route and the restart cascade risks the live `operator` hub + `register.mb`;
+   CLAUDE.md §4). Values mirror prod resourceId 20 (`~/Documents/aibo-server/agent-hub/exposure/CLAUDE.md`),
+   only the subdomain + internal port (3000→3001) change.
+
+Until those two steps are done, use the SSH tunnel above.
 
 ## Files
 

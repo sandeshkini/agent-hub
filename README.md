@@ -1,3 +1,6 @@
+<!-- Working on this repo as an AI/dev? Read CLAUDE.md (canonical) + AGENTS.md first — they cover the
+     build/deploy workflow and the gotchas that cost hours. Roadmap/plan: ROADMAP.md. -->
+
 # Agent Hub — a forked Open WebUI + agents + terminal, in one package
 
 The whole hub as **one repo, one compose, one `.env`**. Open WebUI (our **fork**) is the front end;

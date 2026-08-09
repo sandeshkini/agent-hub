@@ -1,5 +1,16 @@
 #!/usr/bin/env bash
 # build.sh — build the Agent-Hub OWUI fork: pinned upstream + patches/ -> image.
+#
+# ⚠️  AI/DEV CONTRACT (see ../CLAUDE.md §2 + gotchas #1–#3):
+#   • This script does `git reset --hard` on upstream/ and re-applies patches/*.patch. Any edit you
+#     made under upstream/ that is NOT yet captured in the patch WILL BE WIPED. So BEFORE running this,
+#     regenerate the patch:
+#         git -C upstream add -A && git -C upstream diff --cached > patches/0001-terminal-page.patch && git -C upstream reset -q
+#   • Run ONLY ONE build at a time (no double-backgrounding). Two concurrent builds race on upstream/.
+#   • Docker's COPY cache has shipped STALE images — the self-heal block at the end sha1-checks a
+#     sentinel file in the image and rebuilds --no-cache if it drifted. Keep it. Then verify in the
+#     running container: `docker exec open-webui sh -c "grep -rl '<your change>' /app/build"`.
+#
 # Usage:
 #   ./build.sh            # reset upstream, apply patches, docker build the fork image
 #   ./build.sh --check    # only verify all patches apply cleanly (no build)

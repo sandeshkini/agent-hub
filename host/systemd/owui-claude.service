@@ -1,0 +1,15 @@
+[Unit]
+Description=owui-claude — Claude Agent SDK adapter on the HOST (full system access, :9212)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=@HOME@
+Environment=PATH=@HOME@/.local/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=%h/.config/agent-hub/claude-host.env
+ExecStart=/usr/bin/node @REPO@/owui-claude/server.mjs
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target

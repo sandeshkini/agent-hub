@@ -1,0 +1,15 @@
+[Unit]
+Description=owui-opencode — OpenAI adapter over host opencode serve (:9213, full access)
+After=network.target opencode-serve.service
+Wants=opencode-serve.service
+
+[Service]
+Type=simple
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=%h/.config/agent-hub/opencode-host.env
+ExecStart=/usr/bin/python3 @REPO@/owui-opencode/opencode_adapter.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target

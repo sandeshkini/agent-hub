@@ -1,0 +1,14 @@
+[Unit]
+Description=opencode serve — headless engine on the HOST (:4096, full system access)
+After=network.target
+
+[Service]
+Type=simple
+Environment=PATH=@HOME@/.opencode/bin:@HOME@/.local/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=%h/.config/agent-hub/opencode-host.env
+ExecStart=@OPENCODE_BIN@ serve --hostname 127.0.0.1 --port 4096
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target

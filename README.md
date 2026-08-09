@@ -31,6 +31,9 @@ cp .env.example .env         # set COMPOSE_PROFILES=hub|node, secrets, IPs
   the Inbox groups them by "needs attention" / recent.
 - **Shared MCP tools** — add external MCP servers **once** in `.env` (`MCP_SERVERS=[...]`) and every
   agent gets them. Built-ins: `publish_artifact` (shareable web page) + `notify` (phone push).
+- **Skills** — the in-app **Claude** is the same Agent SDK as your terminal `claude` and loads the
+  same skills. Drop a `SKILL.md` in `~/.claude/skills/` and both your CLI (any repo) and the OWUI
+  Claude pick it up (`systemctl --user restart owui-claude` to re-scan). See `CLAUDE.md §5b`.
 - **Slack (optional)** — set `SLACK_*` tokens and add `slack` to `COMPOSE_PROFILES`; chat any
   agent×model from Slack, and threads mirror in as OWUI chats.
 
@@ -57,7 +60,7 @@ stays on the hub — nodes serve Claude + OpenCode.
 | `docker-compose.yml` | the whole stack, `hub`/`node` profiles (fork image default) |
 | `docker-compose.stock.yml` | rollback override → upstream `open-webui:main` |
 | `setup.sh` · `.env.example` | one-command setup + the single config file |
-| `owui-fork/` | the Open WebUI fork (patches + `build.sh`; `upstream/` is gitignored, rebuilt) |
+| `owui-fork/` | the Open WebUI fork (patches + `build.sh` + **render-gated `deploy.sh`**; `upstream/` is gitignored, rebuilt) |
 | `owui-hermes/` `owui-claude/` `owui-opencode/` `opencode/` | the agent adapters |
 | `owui-terminal/` | host PTY-over-WS terminal service + `install.sh` (systemd/launchd) |
 | `mcp-tools/` | shared MCP server (`publish_artifact` + `notify`) for all agents |
@@ -70,6 +73,17 @@ docker compose ps                   # status
 docker compose logs -f owui-claude
 docker compose -f docker-compose.yml -f docker-compose.stock.yml up -d open-webui   # rollback OWUI to :main
 ```
+
+### Shipping a change to the OWUI **fork** (Svelte/FastAPI under `owui-fork/upstream/`)
+Don't `docker compose up --force-recreate open-webui` by hand — a broken fork build returns HTTP 200 but
+a **blank** page, and you'd ship it to prod. Use the render-gated pipeline (builds → render-tests on a
+staging container `:3001` → promotes → keeps a `:prev` rollback):
+```bash
+# edit under owui-fork/upstream/ → regenerate the patch → then:
+./owui-fork/deploy.sh            # gated deploy to prod   (or `staging` to review first, then `promote`)
+./owui-fork/deploy.sh rollback   # instant revert if needed
+```
+Full guide: **`owui-fork/DEPLOYING.md`**. Adapter/host-service changes don't use this (see `CLAUDE.md §2`).
 
 ## macOS (the defaults in this repo are aibo/Linux)
 Everything works on an Apple-Silicon Mac; these are the deltas that actually bite.

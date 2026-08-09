@@ -26,6 +26,16 @@ Last updated: 2026-08-08
 
 ## 2. Recently done (this work session)
 
+- **Safe-deploy pipeline (2026-08-09)** — the OWUI fork now ships through a render gate:
+  `owui-fork/smoke-test.sh` (headless-chromium check) + a staging container (`:3001`, own volume) +
+  `owui-fork/deploy.sh` (`deploy|staging|promote|rollback`). A white-screen build is caught on staging
+  before prod, with an instant `:prev` rollback. Verified by intentionally breaking a build. Docs:
+  `owui-fork/DEPLOYING.md`. **Ship the fork via `deploy.sh`, never a bare `up --force-recreate open-webui`.**
+- **Skills parity (2026-08-09)** — the in-app Claude loads the SAME skills + `CLAUDE.md` as the terminal
+  `claude` (`settingSources:['user'] + skills:'all'`; `~/.claude/skills` shared via `~/.claude-owui/skills`).
+  Drop a `SKILL.md` in `~/.claude/skills/` → both get it. First repo skill: `.claude/skills/deploy-fork`.
+- **Host cutover** — Claude + OpenCode adapters now run as host systemd services (not Docker) for full
+  system access (`systemctl`, all drives); OWUI reaches them via `host.docker.internal`.
 - **500-on-open fix** — an offline MacBook was hanging the hub's model load. Now fails fast.
 - **Bug-hunt pass** (4 audit agents) — fixed: fire-and-forget crash-loop safety, a Claude
   cross-conversation session leak, OpenCode dead-session self-heal, node-registration
@@ -50,12 +60,13 @@ Terminal keyboard/keys/scroll/connection-state; touch-reachable sidebar actions.
 Make it visible, hub-wide, what every agent is doing. This is both the #1 UX fix and the
 foundation the orchestration feature stands on.
 - [x] **Offline-machine honesty** — scoping to an offline machine now says so (amber banner).
-- [ ] **Run registry** — a small server-side store; the 3 adapters heartbeat
+- [x] **Run registry** — server-side store `/api/v1/agent-runs`; the 3 adapters heartbeat
       `running / needs-input / done / failed` per chat (including detached background runs).
-- [ ] **"Running" dot** on sidebar chat rows + inbox, driven by the registry.
-- [ ] **Persist a pending question** — an `AskUserQuestion` survives page reload and shows a
-      "needs input" badge from anywhere (today it's lost on reload → the run stalls forever).
-- [ ] **Plan approval** — an `ExitPlanMode` approve/reject card (today plan runs look hung).
+- [x] **"Running" dot** on sidebar chat rows + inbox, driven by the registry (`agentRuns` store).
+- [x] **Persist a pending question** — an `AskUserQuestion` survives page reload and shows a
+      "needs input" badge from anywhere (parked in the registry, re-hydrated on load).
+- [x] **Plan approval / interactive prompts** — `AskUserQuestion` + `ExitPlanMode` render as native
+      approve/answer cards (E7).
 - [ ] **"Keeps running in background" toast** when you close a tab mid-run.
 
 ### Phase 2 — Multi-agent orchestration  (the headline feature)

@@ -34,8 +34,14 @@ Secrets live only in the generated env files under `~/.config/agent-hub/` (chmod
   maintains. opencode **< 1.18** has a SQLite bug (`NOT NULL constraint failed: session_message.seq`) that
   500s every turn. `install.sh` points the service at whichever `opencode` is **≥ 1.18**. Upgrade with the
   official installer, not npm (npm global-prefix perms often fail).
-- **Claude config isolation.** The adapter uses `CLAUDE_CONFIG_DIR=~/.claude-owui` (symlinks your global
-  `CLAUDE.md`/`settings.json`) so its SDK state never clobbers your interactive `claude`'s `~/.claude.json`.
+- **Claude config isolation + skills parity.** The adapter uses `CLAUDE_CONFIG_DIR=~/.claude-owui` so its
+  SDK state never clobbers your interactive `claude`'s `~/.claude.json`. `install.sh` symlinks your global
+  **`CLAUDE.md`** and **`skills/`** into that dir (`~/.claude-owui/skills → ~/.claude/skills`) so the
+  in-app Claude has the SAME memory + skills as your terminal `claude` — drop a `SKILL.md` in
+  `~/.claude/skills/` and both get it (`server.mjs` sets `settingSources:['user'] + skills:'all'`).
+  ⚠️ It deliberately does **NOT** symlink `~/.claude/settings.json` — that file usually sets
+  `defaultMode:"bypassPermissions"`, which skips `canUseTool` and would break interactive AskUserQuestion
+  + the destructive guardrail. The adapter also pins `permissionMode:'default'` in code. (See `CLAUDE.md §5b`.)
 - **Reachability from the OWUI container:** `OWUI_BASE=http://localhost:3000`, `MCP_TOOLS_URL=http://localhost:8009/mcp`
   (mcp-tools is published to 127.0.0.1:8009). The adapters bind `0.0.0.0:<port>`; open-webui reaches them
   via the `host.docker.internal:host-gateway` extra_host.

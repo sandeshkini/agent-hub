@@ -3,6 +3,8 @@
 **Upstream pinned:** `v0.11.0` (matches the image we ran before forking). Build: `./build.sh`
 (reset `upstream/` → apply `patches/*.patch` in order → `docker build` → `agent-hub/open-webui:v0.11.0-fork`).
 `./build.sh --check` verifies patches apply cleanly; `./build.sh --clone` re-fetches upstream.
+**To SHIP a patch to prod, use the render gate — `./deploy.sh`** (build → staging render-test → promote →
+`:prev` rollback), never a bare `docker compose up --force-recreate open-webui`. See `DEPLOYING.md`.
 
 ## Discipline
 - Patches are **surgical + additive**: new route, new component, new backend router, one nav entry.

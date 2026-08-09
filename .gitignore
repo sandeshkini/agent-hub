@@ -13,3 +13,8 @@ ff-state/
 
 # OWUI fork: track patches + build.sh; NEVER the 150M+ upstream checkout (reproduced by build.sh)
 owui-fork/upstream/
+
+# build artifacts
+__pycache__/
+*.pyc
+owui-claude/package-lock.json

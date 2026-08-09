@@ -183,6 +183,26 @@ git pull --rebase origin main && git push origin main   # the MacBook also pushe
 
 ---
 
+## 5b. Skills — the in-app Claude === your terminal Claude
+
+The `owui-claude` adapter is the **same Agent SDK** as the desktop `claude` CLI; it just runs headless.
+It loads your real **skills** and **memory** so the phone/OWUI Claude behaves like your terminal one:
+
+- **One global skills library:** `~/.claude/skills/`. Drop a `SKILL.md` folder there → **both** the CLI
+  (any repo) and the in-app agent get it. The adapter reaches it via `~/.claude-owui/skills` (a symlink to
+  `~/.claude/skills`, created by `host/install.sh`).
+- **How the adapter loads them** (`owui-claude/server.mjs`): `settingSources: ['user']` + `skills: 'all'`.
+  `'user'` honors `CLAUDE_CONFIG_DIR=~/.claude-owui`, so it reads that dir's `skills/` + `CLAUDE.md`
+  (also symlinked to `~/.claude/CLAUDE.md`). Toggle/override via env `CLAUDE_SETTING_SOURCES`,
+  `CLAUDE_SKILLS`, `CLAUDE_PERMISSION_MODE`.
+- **Repo-scoped skills** live in `<repo>/.claude/skills/` (e.g. `deploy-fork`) and only apply to CLI
+  sessions working in that repo — the in-app agent (cwd `$HOME`) sees only the global library.
+- ⚠️ **Never add `'project'`/`'local'` to the adapter's `settingSources`, and never symlink
+  `~/.claude/settings.json` into `~/.claude-owui`.** The adapter's cwd is `$HOME`, so those sources read
+  the real `~/.claude/settings.json` whose `defaultMode:"bypassPermissions"` SKIPS `canUseTool` — which
+  silently breaks interactive **AskUserQuestion** and the **destructive guardrail**. The adapter pins
+  `permissionMode:'default'` in code; `host/install.sh` keeps `settings.json` out of `.claude-owui`.
+
 ## 6. Repo map (where things live)
 
 | Path | What | Change → how to ship |

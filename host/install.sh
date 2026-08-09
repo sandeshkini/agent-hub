@@ -32,8 +32,17 @@ fi
 echo "  opencode: $OPENCODE_BIN ($("$OPENCODE_BIN" --version))"
 
 # --- claude host adapter needs its own config dir so it never clobbers your interactive ~/.claude ---
-[ -f "$HOME/.claude/CLAUDE.md" ]     && ln -sf "$HOME/.claude/CLAUDE.md"     "$HOME/.claude-owui/CLAUDE.md"     || true
-[ -f "$HOME/.claude/settings.json" ] && ln -sf "$HOME/.claude/settings.json" "$HOME/.claude-owui/settings.json" || true
+# Share MEMORY (CLAUDE.md) and SKILLS with the interactive CLI so the in-app Claude === your terminal
+# Claude. Drop a SKILL.md in ~/.claude/skills → BOTH pick it up (server.mjs enables settingSources:'user'
+# + skills:'all', and 'user' honors CLAUDE_CONFIG_DIR=~/.claude-owui).
+[ -f "$HOME/.claude/CLAUDE.md" ] && ln -sf "$HOME/.claude/CLAUDE.md" "$HOME/.claude-owui/CLAUDE.md" || true
+mkdir -p "$HOME/.claude/skills"
+ln -sfn "$HOME/.claude/skills" "$HOME/.claude-owui/skills"
+# ⚠️ Do NOT symlink ~/.claude/settings.json here. It typically sets defaultMode:"bypassPermissions",
+# which the adapter loads via settingSources:'user' and which SKIPS canUseTool — that silently breaks
+# interactive AskUserQuestion AND the destructive-command guardrail. The adapter pins permissionMode
+# 'default' in code, but keeping settings.json out of .claude-owui is the belt-and-suspenders.
+rm -f "$HOME/.claude-owui/settings.json"   # remove any stale symlink from older installs
 
 # --- env files (secrets stay here, chmod 600) ---
 cat > "$CFG/claude-host.env" <<EOF

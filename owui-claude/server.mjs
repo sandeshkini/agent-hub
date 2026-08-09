@@ -212,6 +212,23 @@ async function* streamTurn(chatId, model, messages, ctx = {}) {
     includePartialMessages: true,
     model: model || DEFAULT_MODEL,
     additionalDirectories: [WORKSPACE, "/tmp"],
+    // ── SAME BRAIN AS CLAUDE CODE (skills + memory parity) ──────────────────────────────────────
+    // Load the same filesystem config the desktop `claude` CLI uses so the in-app Claude has YOUR
+    // skills and memory — it's the same Agent SDK, just told where to look. settingSources 'user'
+    // honors CLAUDE_CONFIG_DIR (=~/.claude-owui): it discovers ~/.claude-owui/skills (symlinked to
+    // ~/.claude/skills — ONE global library shared with the CLI, drop a SKILL.md there and BOTH get it)
+    // and CLAUDE.md (already symlinked to ~/.claude/CLAUDE.md). `skills:'all'` enables every discovered
+    // skill (frontmatter only until used, so it's cheap).
+    // ⚠️ DO NOT add 'project'/'local' here: cwd is $HOME, so those sources would read the REAL
+    // ~/.claude/settings.json, whose `defaultMode:"bypassPermissions"` SKIPS canUseTool and would
+    // re-break AskUserQuestion + the guardrail. 'user' points at .claude-owui which has no such file.
+    settingSources: (process.env.CLAUDE_SETTING_SOURCES ?? "user").split(",").map((s) => s.trim()).filter(Boolean),
+    skills: (process.env.CLAUDE_SKILLS ?? "all").trim() === "all"
+      ? "all"
+      : (process.env.CLAUDE_SKILLS || "").split(",").map((s) => s.trim()).filter(Boolean),
+    // Pin the permission mode so canUseTool ALWAYS runs (interactive AskUserQuestion + guardrail),
+    // independent of any defaultMode a loaded settings source might carry.
+    permissionMode: process.env.CLAUDE_PERMISSION_MODE || "default",
     // Belt-and-suspenders: the guardrail is ALSO a PreToolUse hook (fires regardless of permission mode).
     // $WORKSPACE is the real host home mounted rw, so this deterministic block matters.
     hooks: {

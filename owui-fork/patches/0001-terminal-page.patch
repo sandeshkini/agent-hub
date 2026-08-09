@@ -993,7 +993,7 @@ index ce1eda9..04a7ab9 100644
  	<div bind:this={terminalEl} class="absolute inset-0 px-0.5" class:pointer-events-none={overlay} />
  </div>
 diff --git a/src/lib/components/layout/Sidebar.svelte b/src/lib/components/layout/Sidebar.svelte
-index f8ac62b..82ad372 100644
+index f8ac62b..438b735 100644
 --- a/src/lib/components/layout/Sidebar.svelte
 +++ b/src/lib/components/layout/Sidebar.svelte
 @@ -74,6 +74,7 @@
@@ -1098,7 +1098,17 @@ index f8ac62b..82ad372 100644
  										{/if}
  									</div>
  								</a>
-@@ -1259,6 +1294,10 @@
+@@ -1184,6 +1219,9 @@
+ 					}
+ 				}}
+ 			>
++				<!-- LOCAL PATCH (machine-first): top-level Machine context anchor — everything below is scoped to it. -->
++				<MachineSelector />
++
+ 				<div class="pb-1">
+ 					<div class="px-1 flex justify-center text-gray-700 dark:text-gray-300">
+ 						<a
+@@ -1259,6 +1297,10 @@
  												<CalendarIcon className="size-4" strokeWidth="1.5" />
  											{:else if itemId === 'playground'}
  												<CodeIcon className="size-4" strokeWidth="1.5" />
@@ -1109,35 +1119,17 @@ index f8ac62b..82ad372 100644
  											{/if}
  										</div>
  
-@@ -1272,6 +1311,27 @@
+@@ -1272,6 +1314,9 @@
  					</div>
  				</div>
  
-+				<!-- LOCAL PATCH (E4): machine selector — scopes model list + terminal target -->
-+				<MachineSelector />
-+
-+				<!-- LOCAL PATCH (UX): a persistent, tappable filter banner so a machine-scoped (and possibly
-+					 empty) chat/terminal list never looks like data loss — always shows the active scope + clear. -->
-+				{#if $selectedNodeId}
-+					{@const _sel = $nodes.find((n) => n.id === $selectedNodeId)}
-+					<button
-+						class="mx-1.5 mb-1 w-[calc(100%-0.75rem)] flex items-center gap-1.5 px-2 py-1.5 rounded-lg text-xs transition {_sel && !_sel.online
-+							? 'text-amber-600 dark:text-amber-500 bg-amber-500/10 hover:bg-amber-500/15'
-+							: 'text-gray-500 bg-black/[0.03] dark:bg-white/[0.03] hover:bg-black/[0.06] dark:hover:bg-white/[0.06]'}"
-+						on:click={() => selectedNodeId.set(null)}
-+						title={$i18n.t('Show all machines')}>
-+						<span class="size-1.5 shrink-0 rounded-full {_sel?.online ? 'bg-green-500' : 'bg-amber-500'}"></span>
-+						<span class="truncate flex-1 text-left">
-+							{#if _sel && !_sel.online}{_sel.label} — {$i18n.t('offline, unavailable')}{:else}{$i18n.t('Filtered to')} {_sel?.label ?? $selectedNodeId}{/if}
-+						</span>
-+						<span class="shrink-0 opacity-60">✕ {$i18n.t('All')}</span>
-+					</button>
-+				{/if}
++				<!-- LOCAL PATCH (machine-first): the machine switcher now lives at the TOP of the sidebar
++					 (above New Chat) as the top-level context anchor. -->
 +
  				{#if ($models ?? []).length > 0 && (($settings?.pinnedModels ?? []).length > 0 || $config?.default_pinned_models)}
  					<SidebarSection
  						id="sidebar-models"
-@@ -1391,6 +1451,30 @@
+@@ -1391,6 +1436,30 @@
  					</SidebarSection>
  				{/if}
  
@@ -1168,7 +1160,7 @@ index f8ac62b..82ad372 100644
  				<SidebarSection
  					id="sidebar-chats"
  					className="mt-0.5"
-@@ -1586,13 +1670,13 @@
+@@ -1586,13 +1655,13 @@
  					<div class=" flex-1 flex flex-col overflow-y-auto scrollbar-hidden">
  						<div class="pt-1.5">
  							{#if $chats}
@@ -1186,7 +1178,7 @@ index f8ac62b..82ad372 100644
  										>
  											{$i18n.t(chat.time_range)}
  											<!-- localisation keys for time_range to be recognized from the i18next parser (so they don't get automatically removed):
-@@ -1624,6 +1708,8 @@
+@@ -1624,6 +1693,8 @@
  										updatedAt={chat.updated_at}
  										lastReadAt={chat.last_read_at}
  										active={chat.active ?? false}
@@ -1303,10 +1295,10 @@ index 0000000..3fe0058
 +{/if}
 diff --git a/src/lib/components/layout/Sidebar/MachineSelector.svelte b/src/lib/components/layout/Sidebar/MachineSelector.svelte
 new file mode 100644
-index 0000000..7ba4e41
+index 0000000..9d16e1c
 --- /dev/null
 +++ b/src/lib/components/layout/Sidebar/MachineSelector.svelte
-@@ -0,0 +1,72 @@
+@@ -0,0 +1,76 @@
 +<script lang="ts">
 +	// LOCAL PATCH (agent-hub fork, E4): machine selector. Picks a registered node → scopes the chat
 +	// model list (via selectedNodeModelIds) AND the /terminal target (selectMachine sets selectedTerminalId).
@@ -1325,28 +1317,32 @@ index 0000000..7ba4e41
 +</script>
 +
 +{#if ($nodes ?? []).length > 0}
-+	<!-- A bordered pill (not a flat nav row) so it reads as a SCOPE selector: a tiny "Machine" label +
-+		 the current machine + online dot + chevron. Separated from the primary nav by a divider above. -->
-+	<div class="mx-3 mt-1.5 mb-0.5 border-t border-gray-100 dark:border-gray-850"></div>
-+	<div class="px-1.5 relative">
++	{@const off = $selectedNode && !$selectedNode.online}
++	<!-- TOP-LEVEL CONTEXT ANCHOR (machine-first sidebar): a hero switcher — icon tile + MACHINE eyebrow +
++		 the current machine + status. Everything below is scoped to it. Turns amber when the machine is offline. -->
++	<div class="px-2 pt-0.5 pb-2 relative">
 +		<button
-+			class="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-[13px] border border-gray-100 dark:border-gray-850 bg-gray-50/70 dark:bg-gray-900/40 hover:bg-gray-100 dark:hover:bg-gray-850 transition"
++			class="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-xl border transition {off
++				? 'border-amber-500/40 bg-amber-500/10 hover:bg-amber-500/15'
++				: 'border-gray-100 dark:border-gray-800 bg-gray-50 dark:bg-gray-900/60 hover:bg-gray-100 dark:hover:bg-gray-850'}"
 +			on:click={() => (open = !open)}
 +			aria-haspopup="listbox"
 +			aria-expanded={open}
 +			title={$i18n.t('Machine')}
 +		>
-+			<!-- server/desktop glyph -->
-+			<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.7"
-+				stroke="currentColor" class="size-4 shrink-0 text-gray-500">
-+				<path stroke-linecap="round" stroke-linejoin="round"
-+					d="M9 17.25v1.007a3 3 0 0 1-.879 2.122L7.5 21h9l-.621-.621A3 3 0 0 1 15 18.257V17.25m6-12V15a2.25 2.25 0 0 1-2.25 2.25H5.25A2.25 2.25 0 0 1 3 15V5.25m18 0A2.25 2.25 0 0 0 18.75 3H5.25A2.25 2.25 0 0 0 3 5.25m18 0V12a2.25 2.25 0 0 1-2.25 2.25H5.25A2.25 2.25 0 0 1 3 12V5.25" />
-+			</svg>
-+			<span class="text-[10px] font-semibold uppercase tracking-wider text-gray-400 shrink-0">{$i18n.t('Machine')}</span>
-+			<span class="flex-1 min-w-0 truncate text-left text-gray-700 dark:text-gray-200">
-+				{$selectedNode?.label ?? $i18n.t('All')}
-+			</span>
-+			<span class="size-1.5 rounded-full shrink-0 {$selectedNode ? ($selectedNode.online ? 'bg-green-500' : 'bg-gray-400') : 'bg-gray-300 dark:bg-gray-600'}"></span>
++			<div class="size-7 shrink-0 rounded-lg flex items-center justify-center {off ? 'bg-amber-500/20 text-amber-500' : 'bg-gray-200/70 dark:bg-gray-800 text-gray-500 dark:text-gray-300'}">
++				<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.7" stroke="currentColor" class="size-4">
++					<path stroke-linecap="round" stroke-linejoin="round"
++						d="M9 17.25v1.007a3 3 0 0 1-.879 2.122L7.5 21h9l-.621-.621A3 3 0 0 1 15 18.257V17.25m6-12V15a2.25 2.25 0 0 1-2.25 2.25H5.25A2.25 2.25 0 0 1 3 15V5.25m18 0A2.25 2.25 0 0 0 18.75 3H5.25A2.25 2.25 0 0 0 3 5.25m18 0V12a2.25 2.25 0 0 1-2.25 2.25H5.25A2.25 2.25 0 0 1 3 12V5.25" />
++				</svg>
++			</div>
++			<div class="flex-1 min-w-0 text-left">
++				<div class="text-[10px] font-semibold uppercase tracking-wider text-gray-400 leading-none">{$i18n.t('Machine')}</div>
++				<div class="text-sm font-semibold truncate leading-tight mt-0.5 {off ? 'text-amber-600 dark:text-amber-500' : 'text-gray-800 dark:text-gray-100'}">
++					{$selectedNode?.label ?? $i18n.t('All machines')}{#if off} · {$i18n.t('offline')}{/if}
++				</div>
++			</div>
++			<span class="size-2 rounded-full shrink-0 {$selectedNode ? ($selectedNode.online ? 'bg-green-500' : 'bg-amber-500') : 'bg-gray-300 dark:bg-gray-600'}"></span>
 +			<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"
 +				class="size-3.5 shrink-0 text-gray-400 transition-transform {open ? 'rotate-180' : ''}">
 +				<path fill-rule="evenodd" d="M5.22 8.22a.75.75 0 0 1 1.06 0L10 11.94l3.72-3.72a.75.75 0 1 1 1.06 1.06l-4.25 4.25a.75.75 0 0 1-1.06 0L5.22 9.28a.75.75 0 0 1 0-1.06Z" clip-rule="evenodd" />

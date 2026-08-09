@@ -151,7 +151,39 @@ async function* streamTurn(chatId, model, messages, ctx = {}) {
   // another's Claude session (cross-conversation context leak). No chat id ⇒ fresh session, no resume.
   const conv = chatId ? "id:" + chatId : null;
   const resume = conv ? cacheGet(conv) : undefined;
-  const opts = { canUseTool: makeCanUseTool(chatId, ctx), cwd: WORKSPACE, includePartialMessages: true, model: model || DEFAULT_MODEL };
+  // Permissions: this adapter is driven by OWUI, where nobody can answer an interactive permission
+  // prompt — an unanswered one hangs the turn forever. Skip the SDK's prompting entirely.
+  const opts = {
+    canUseTool: makeCanUseTool(chatId, ctx),
+    cwd: WORKSPACE,
+    includePartialMessages: true,
+    model: model || DEFAULT_MODEL,
+    permissionMode: "bypassPermissions",
+    allowDangerouslySkipPermissions: true,   // required by the SDK when bypassing
+    additionalDirectories: [WORKSPACE, "/tmp"],
+    // bypassPermissions skips canUseTool entirely, which would silently drop the destructive-command
+    // guardrail. PreToolUse hooks still fire under bypass, so enforce it here — deterministic block,
+    // not model judgement. $WORKSPACE is the real host home mounted rw, so this is the only backstop.
+    hooks: {
+      PreToolUse: [{
+        hooks: [async (input) => {
+          const t = input?.tool_name || input?.toolName || "";
+          const inp = input?.tool_input || input?.toolInput || {};
+          if ((t === "Bash" || t === "Shell") && isDestructive(inp)) {
+            return {
+              continue: false,
+              hookSpecificOutput: {
+                hookEventName: "PreToolUse",
+                permissionDecision: "deny",
+                permissionDecisionReason: "BLOCKED by system-safety guardrail: irreversible/system-destroying command is forbidden.",
+              },
+            };
+          }
+          return { continue: true };
+        }],
+      }],
+    },
+  };
   // shared MCP tools (publish_artifact + notify) — same server all agents use; calls render as native cards.
   // strictMcpConfig: load ONLY this MCP server (ignore any host/project .mcp.json so the agent doesn't
   // pick up unrelated servers via the workspace mount).

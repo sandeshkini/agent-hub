@@ -34,6 +34,12 @@ services:
       AGENT_NTFY_ENABLED: "${AGENT_NTFY_ENABLED:-true}"
       AGENT_NTFY_DELIVERY: "${AGENT_NTFY_DELIVERY:-away}"   # away | always
       AGENT_NTFY_CLICK_BASE: "${AGENT_NTFY_CLICK_BASE:-https://operator.kingdomofluna.com}"
+      # Native "Publish to artifacts board" button (routers/agent_artifacts.py) — proxies the browser's
+      # publish to the board's token-gated API (token stays server-side) + lists the board as JSON.
+      ARTIFACTS_API: "${ARTIFACTS_API:-http://artifacts:8080/api/publish}"
+      ARTIFACTS_LIST_API: "${ARTIFACTS_LIST_API:-http://artifacts:8080/api/list}"
+      ARTIFACTS_PUBLIC_BASE: "${ARTIFACTS_PUBLIC_BASE:-https://apps.kingdomofluna.com}"
+      PUBLISH_TOKEN: "${PUBLISH_TOKEN}"
       WEBUI_SECRET_KEY: "${WEBUI_SECRET_KEY}"     # PINNED → stable JWT sessions across restarts
       NODE_HUB_TOKEN: "${NODE_HUB_TOKEN:-}"       # gates /api/nodes/register (empty = open, LAN only)
       # Settings→Account→API keys; the slack-gateway needs one for OWUI_API_KEY. NOTE: this only seeds

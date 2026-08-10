@@ -114,6 +114,14 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (req.method !== 'GET') return send(res, 405, 'method not allowed')
+
+  // ── JSON list API ── GET /api/list → { items:[{kind, name, href, created}] } (newest first).
+  // Powers the OWUI native Artifacts panel (fork proxies this + prepends the public origin).
+  if (url === '/api/list') {
+    const items = allItems().map(i => ({ kind: i.kind, name: pretty(i.name), href: i.href, created: i.t }))
+    return send(res, 200, JSON.stringify({ items }), 'application/json')
+  }
+
   if (url === '/' || url === '') return send(res, 200, indexPage())
 
   let m = url.match(/^\/summaries\/(.+)$/)

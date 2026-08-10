@@ -1,8 +1,8 @@
 diff --git a/backend/open_webui/main.py b/backend/open_webui/main.py
-index 55613ac..ce12845 100644
+index 55613ac..8785be0 100644
 --- a/backend/open_webui/main.py
 +++ b/backend/open_webui/main.py
-@@ -138,6 +138,12 @@ from open_webui.models.models import Models
+@@ -138,6 +138,13 @@ from open_webui.models.models import Models
  from open_webui.models.users import Users
  from open_webui.routers import (
      analytics,
@@ -12,10 +12,11 @@ index 55613ac..ce12845 100644
 +    agent_terminal_sync,  # LOCAL PATCH (agent-hub fork): cross-device terminal-session sync
 +    agent_runs,  # LOCAL PATCH (agent-hub fork, Phase 1): run/question presence registry
 +    agent_activity,  # LOCAL PATCH (agent-hub fork, Tier 2): per-subagent activity tree registry
++    agent_artifacts,  # LOCAL PATCH (agent-hub fork): native publish-to-artifacts-board + list API
      audio,
      auths,
      automations,
-@@ -822,6 +828,14 @@ if ENABLE_ADMIN_ANALYTICS:
+@@ -822,6 +829,15 @@ if ENABLE_ADMIN_ANALYTICS:
  app.include_router(utils.router, prefix='/api/v1/utils', tags=['utils'])
  app.include_router(terminals.router, prefix='/api/v1/terminals', tags=['terminals'])
  app.include_router(automations.router, prefix='/api/v1/automations', tags=['automations'])
@@ -27,6 +28,7 @@ index 55613ac..ce12845 100644
 +app.include_router(agent_terminal_sync.router, prefix='/api/v1/terminal-sessions', tags=['terminals'])  # LOCAL PATCH
 +app.include_router(agent_runs.router, prefix='/api/v1/agent-runs', tags=['agent'])  # LOCAL PATCH (Phase 1)
 +app.include_router(agent_activity.router, prefix='/api/v1/agent-activity', tags=['agent'])  # LOCAL PATCH (Tier 2)
++app.include_router(agent_artifacts.router, prefix='/api/v1/artifacts', tags=['agent'])  # LOCAL PATCH (publish button)
  app.include_router(calendar.router, prefix='/api/v1/calendars', tags=['calendars'])
  
  # SCIM 2.0 API for identity management
@@ -325,6 +327,93 @@ index 0000000..ee17b5d
 +                return {"ok": ok, "status": r.status}
 +    except Exception as e:
 +        raise HTTPException(status_code=502, detail=f"adapter unreachable: {e}")
+diff --git a/backend/open_webui/routers/agent_artifacts.py b/backend/open_webui/routers/agent_artifacts.py
+new file mode 100644
+index 0000000..281d6e3
+--- /dev/null
++++ b/backend/open_webui/routers/agent_artifacts.py
+@@ -0,0 +1,81 @@
++# LOCAL PATCH (agent-hub fork): native "Publish to artifacts board" + a board LIST API.
++#
++# Why a fork route (not call the board directly from the browser): the board's POST /api/publish is
++# gated by a server-side PUBLISH_TOKEN that must NOT reach the browser. So the browser hits this
++# JWT-authed route, and we proxy to the board with the token server-side. Returns the PUBLIC url.
++#
++# The board is HUB-ONLY (one bus for the whole fleet — nodes publish to the hub's board, they don't run
++# their own), so GET /list here IS the cross-machine aggregation: everything any machine published lands
++# on this one board. Best-effort + fail-safe: publishing/listing never 500s the app.
++import os
++
++import aiohttp
++from fastapi import APIRouter, Depends, HTTPException
++from pydantic import BaseModel
++
++from open_webui.utils.auth import get_verified_user
++
++router = APIRouter()
++
++ARTIFACTS_API = os.environ.get("ARTIFACTS_API", "http://artifacts:8080/api/publish").rstrip("/")
++ARTIFACTS_LIST_API = os.environ.get("ARTIFACTS_LIST_API", "http://artifacts:8080/api/list").rstrip("/")
++PUBLISH_TOKEN = os.environ.get("PUBLISH_TOKEN", "")
++# public base the phone/browser opens — the board's external URL INCLUDING its base path prefix is
++# already baked into the `url` the board returns (e.g. /artifacts/summaries/…), so we only prepend origin.
++ARTIFACTS_PUBLIC_BASE = os.environ.get("ARTIFACTS_PUBLIC_BASE", "https://apps.kingdomofluna.com").rstrip("/")
++
++
++class PublishBody(BaseModel):
++    title: str = ""
++    content: str = ""
++    kind: str = "summary"   # summary | app
++    format: str = "md"      # md | html
++
++
++@router.post("/publish")
++async def publish(body: PublishBody, user=Depends(get_verified_user)):
++    """Browser (JWT): publish a message's content as a shareable board page; returns the public URL."""
++    if not PUBLISH_TOKEN:
++        raise HTTPException(status_code=503, detail="publishing not configured")
++    content = (body.content or "").strip()
++    if not content:
++        raise HTTPException(status_code=400, detail="content required")
++    title = (body.title or "").strip() or "Untitled"
++    kind = body.kind if body.kind in ("summary", "app") else "summary"
++    fmt = body.format if body.format in ("md", "html") else "md"
++    payload = {"title": title, "kind": kind, "format": fmt, "content": content}
++    try:
++        async with aiohttp.ClientSession() as s:
++            async with s.post(
++                ARTIFACTS_API,
++                json=payload,
++                headers={"X-Publish-Token": PUBLISH_TOKEN},
++                timeout=aiohttp.ClientTimeout(total=15),
++            ) as r:
++                data = await r.json()
++                if r.status != 200 or not data.get("url"):
++                    raise HTTPException(status_code=502, detail=data.get("error") or "publish failed")
++                return {"ok": True, "url": ARTIFACTS_PUBLIC_BASE + data["url"]}
++    except HTTPException:
++        raise
++    except Exception as e:
++        raise HTTPException(status_code=502, detail=f"artifacts board unreachable: {e}")
++
++
++@router.get("/list")
++async def list_artifacts(user=Depends(get_verified_user)):
++    """Board items as JSON, newest first, with absolute public URLs. Best-effort (empty on any error)."""
++    try:
++        async with aiohttp.ClientSession() as s:
++            async with s.get(ARTIFACTS_LIST_API, timeout=aiohttp.ClientTimeout(total=8)) as r:
++                if r.status != 200:
++                    return {"items": []}
++                data = await r.json()
++        items = data.get("items", []) if isinstance(data, dict) else []
++        for it in items:
++            href = str(it.get("href") or "")
++            if href.startswith("/"):
++                it["url"] = ARTIFACTS_PUBLIC_BASE + href
++        return {"items": items}
++    except Exception:
++        return {"items": []}
 diff --git a/backend/open_webui/routers/agent_inbox.py b/backend/open_webui/routers/agent_inbox.py
 new file mode 100644
 index 0000000..b9e66ff
@@ -1008,6 +1097,63 @@ index 271d072..1385984 100644
  
  # We believe in one maker of all models, seen and unseen,
  # and in the reasoning which proceeds from the architect.
+diff --git a/src/lib/apis/artifacts/index.ts b/src/lib/apis/artifacts/index.ts
+new file mode 100644
+index 0000000..1ee7ed5
+--- /dev/null
++++ b/src/lib/apis/artifacts/index.ts
+@@ -0,0 +1,51 @@
++// LOCAL PATCH (agent-hub fork): native publish-to-artifacts-board client.
++import { WEBUI_API_BASE_URL } from '$lib/constants';
++
++export const publishArtifact = async (
++	token: string,
++	title: string,
++	content: string,
++	kind: 'summary' | 'app' = 'summary',
++	format: 'md' | 'html' = 'md'
++) => {
++	let error = null;
++
++	const res = await fetch(`${WEBUI_API_BASE_URL}/artifacts/publish`, {
++		method: 'POST',
++		headers: {
++			Accept: 'application/json',
++			'Content-Type': 'application/json',
++			...(token && { authorization: `Bearer ${token}` })
++		},
++		body: JSON.stringify({ title, content, kind, format })
++	})
++		.then(async (res) => {
++			if (!res.ok) throw await res.json();
++			return res.json();
++		})
++		.catch((err) => {
++			error = err?.detail ?? err;
++			console.error(err);
++			return null;
++		});
++
++	if (error) {
++		throw error;
++	}
++
++	return res as { ok: boolean; url: string };
++};
++
++export const listArtifacts = async (token: string) => {
++	const res = await fetch(`${WEBUI_API_BASE_URL}/artifacts/list`, {
++		method: 'GET',
++		headers: {
++			Accept: 'application/json',
++			...(token && { authorization: `Bearer ${token}` })
++		}
++	})
++		.then(async (res) => (res.ok ? res.json() : { items: [] }))
++		.catch(() => ({ items: [] }));
++
++	return (res?.items ?? []) as Array<{ kind: string; name: string; href: string; url?: string }>;
++};
 diff --git a/src/lib/components/chat/AgentActivity.svelte b/src/lib/components/chat/AgentActivity.svelte
 new file mode 100644
 index 0000000..6ba79eb
@@ -1435,6 +1581,84 @@ index 883bdba..61c7de1 100644
  												{/if}
  											{/if}
  										</div>
+diff --git a/src/lib/components/chat/Messages/ResponseMessage.svelte b/src/lib/components/chat/Messages/ResponseMessage.svelte
+index 2f75e57..0186cd2 100644
+--- a/src/lib/components/chat/Messages/ResponseMessage.svelte
++++ b/src/lib/components/chat/Messages/ResponseMessage.svelte
+@@ -48,6 +48,8 @@
+ 	import Spinner from '$lib/components/common/Spinner.svelte';
+ 	import WebSearchResults from './ResponseMessage/WebSearchResults.svelte';
+ 	import Sparkles from '$lib/components/icons/Sparkles.svelte';
++	import Share from '$lib/components/icons/Share.svelte';
++	import { publishArtifact } from '$lib/apis/artifacts';
+ 
+ 	import DeleteConfirmDialog from '$lib/components/common/ConfirmDialog.svelte';
+ 
+@@ -204,6 +206,41 @@
+ 
+ 	let showRateComment = false;
+ 
++	// LOCAL PATCH (agent-hub fork): publish this reply to the artifacts board (→ shareable page + phone push).
++	let publishing = false;
++	const publishArtifactHandler = async () => {
++		if (publishing) return;
++		const content = (visibleResponseContent ?? '').trim();
++		if (!content) {
++			toast.error($i18n.t('Nothing to publish'));
++			return;
++		}
++		// derive a title from the first non-empty line (strip markdown heading/emphasis markers)
++		const title =
++			(content.split('\n').find((l) => l.trim()) || 'Untitled')
++				.replace(/^#+\s*/, '')
++				.replace(/[*_`>#]/g, '')
++				.trim()
++				.slice(0, 80) || 'Untitled';
++		publishing = true;
++		const t = toast.loading($i18n.t('Publishing to artifacts board…'));
++		try {
++			const res = await publishArtifact(localStorage.token, title, content);
++			toast.dismiss(t);
++			if (res?.url) {
++				toast.success($i18n.t('Published — opening the page'));
++				window.open(res.url, '_blank');
++			} else {
++				toast.success($i18n.t('Published to artifacts board'));
++			}
++		} catch (e) {
++			toast.dismiss(t);
++			toast.error(`${$i18n.t('Publish failed')}: ${typeof e === 'string' ? e : (e?.detail ?? '')}`);
++		} finally {
++			publishing = false;
++		}
++	};
++
+ 	const copyToClipboard = async (text) => {
+ 		text = removeAllDetails(text);
+ 
+@@ -1075,6 +1112,22 @@
+ 									</button>
+ 								</Tooltip>
+ 
++								{#if visibleResponseContent}
++									<!-- LOCAL PATCH (agent-hub fork): Publish to artifacts board -->
++									<Tooltip content={$i18n.t('Publish to artifacts board')} placement="bottom">
++										<button
++											aria-label={$i18n.t('Publish to artifacts board')}
++											disabled={publishing}
++											class="{isLastMessage || ($settings?.highContrastMode ?? false)
++												? 'visible'
++												: 'invisible group-hover:visible'} p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-lg dark:hover:text-white hover:text-black transition disabled:opacity-40"
++											on:click={publishArtifactHandler}
++										>
++											<Share className="w-4 h-4" strokeWidth="2.3" />
++										</button>
++									</Tooltip>
++								{/if}
++
+ 								{#if onInsertToNote && visibleResponseContent}
+ 									<Tooltip content={$i18n.t('Insert into note')} placement="bottom">
+ 										<button
 diff --git a/src/lib/components/chat/ModelSelector/Selector.svelte b/src/lib/components/chat/ModelSelector/Selector.svelte
 index 28654d6..7bec24d 100644
 --- a/src/lib/components/chat/ModelSelector/Selector.svelte

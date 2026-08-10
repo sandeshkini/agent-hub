@@ -191,6 +191,10 @@ function htmlAttr(s) {
 // card lean and cap how many FULL cards a single turn emits (see the user/tool_result branch).
 const TOOLCARD_MAX = Number(process.env.CLAUDE_TOOLCARD_MAX || 2000);   // per-card result truncation (chars)
 const TOOLCARD_CAP = Number(process.env.CLAUDE_TOOLCARD_CAP || 40);     // max full cards per turn; extras become one-liners
+// CC-LIKE VIEW: by default hide subagents' INTERNAL tool_use/tool_result (messages with parent_tool_use_id
+// set) so the chat shows the ORCHESTRATOR only — each subagent is represented by its compact
+// task_started/task_notification cards, exactly like Claude Code. Set =1 to see full subagent detail.
+const SHOW_SUBAGENT_TOOLS = process.env.CLAUDE_SHOW_SUBAGENT_TOOLS === "1";
 function toolCard(name, argsJson, resultText, isError) {
   let res = resultText || "";
   // FIX(bug2): neutralize backticks (-> U+02BB) BEFORE truncation so a ``` near the cut can't break the
@@ -359,6 +363,9 @@ async function* streamTurn(chatId, model, messages, ctx = {}) {
       const m = step.value;
       // Any real content activity means the model started/continued a turn → cancel a pending finalize.
       if (m.type === "assistant" || m.type === "stream_event" || m.type === "user") drainPending = false;
+      // CC-LIKE VIEW: a message with parent_tool_use_id set is a SUBAGENT's internal work — suppress it so
+      // only the orchestrator is shown inline (the subagent still appears as its compact task cards).
+      if (!SHOW_SUBAGENT_TOOLS && m.parent_tool_use_id) continue;
       if (m.type === "system" && m.subtype === "init") { if (m.session_id) cachePut(conv, m.session_id); }
       else if (m.type === "system" && m.subtype === "background_tasks_changed") {
         // BACKGROUND-SUBAGENT FIX: track live background tasks (REPLACE semantics). While any are live we

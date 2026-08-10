@@ -81,6 +81,13 @@ machines), with every sub-run visible/answerable via the Phase-1 presence layer.
 _Example: "ship feature X" → OpenCode writes it on the MacBook, Claude reviews + tests,
 Hermes updates docs, merged into one chat with a PR link._
 
+- **Agent-view Tier 1 ✅ DONE (2026-08-09)** — the chat reads like Claude Code: subagent internals are
+  hidden inline (only the orchestrator shows), each subagent = one compact task card. Plus a 40-card
+  per-turn cap so a huge exploration turn can't build an unrenderable message.
+- **Agent-view Tier 2 (planned EPIC)** — an optional, on-demand **agent activity view**: a collapsible
+  orchestrator→subagent tree with a live tool timeline you can expand per subagent. Full spec + tasks +
+  tests: **`docs/EPIC-agent-activity-view.md`**.
+
 ### Phase 3 — Shared memory + knowledge (RAG)
 Persistent cross-agent memory + retrieval over your docs/repos, so agents know your world
 (portfolio, dispatch, homelab) without re-explaining. Makes the orchestrator much smarter.

@@ -171,9 +171,8 @@ section headers, and time dividers all looked the same. Now there are three tier
 
 **Cutover is safe now** (all adapters + fork verified). These are the known-open items, none blocking:
 
-- **Staging subdomain** (`L2b`, task #120) — `staging.operator.kingdomofluna.com` needs a manual
-  Cloudflare A record + a Pangolin UI resource (no API; can't be automated). Until then, review staging
-  via `ssh -L 3001:localhost:3001 aibo`. Steps in `owui-fork/DEPLOYING.md`.
+- ~~Staging subdomain (`L2b`, #120)~~ — **✅ DONE (2026-08-09):** `staging.operator.kingdomofluna.com` is
+  live (Pangolin resource 29 → aibo:3001, cloned from `operator`; wildcard DNS). `owui-fork/DEPLOYING.md`.
 - **MacBook node is stale** (`E5.2`, task #76) — the `mb.*` agents run OLD adapter code; needs a
   `git pull` + rebuild on the MacBook to get this session's fixes (drains, CC-view, activity, etc.).
 - **Agent Activity View — future ideas** (EPIC done): multi-machine subagents aren't surfaced; nested

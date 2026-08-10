@@ -71,31 +71,23 @@ regen the patch, run `deploy.sh` again. Prod never moved.
 - ✅ If prod ever does white-screen, `./owui-fork/deploy.sh rollback` gets you back to the last image
   immediately, then debug on staging.
 
-## Staging URL (`staging.operator.kingdomofluna.com`) — optional, needs 2 human steps
+## Staging URL — `https://staging.operator.kingdomofluna.com` ✅ LIVE (provisioned 2026-08-09)
 
-The staging container binds `127.0.0.1:3001`. **The pipeline is fully usable without this subdomain** —
-review locally with an SSH tunnel:
+Behind the same Pangolin SSO as prod → aibo `:3001` (the staging container). Use it to review a candidate
+build off-box (phone/laptop) during `./deploy.sh staging`. The staging container is left running after any
+deploy so the URL stays live; if you ever `docker compose --profile staging stop open-webui-staging`, the
+URL 502s after SSO until the next staging/deploy run brings it back.
 
-```bash
-ssh -L 3001:localhost:3001 aibo         # then open http://localhost:3001/
-```
+**How it was provisioned** (for reference / a second env): DNS is a wildcard `*.operator.kingdomofluna.com`
+→ `46.62.218.143` (Cloudflare, manual — Turnstile-walled, no on-box token). The Pangolin resource was
+**cloned from prod `operator` (resourceId 20) in `db.sqlite`** on the VPS (`root@46.62.218.143`,
+`/root/config/db/db.sqlite`) — a new `resources` row (subdomain `staging.operator`, domain2, ssl+sso),
+a `targets` row (site 1 = aibo, `localhost:3001`, unique `internalPort`), and a `roleResources` grant
+(roleId 1) — then the restart cascade: **VPS `docker restart pangolin gerbil traefik`** + **aibo
+`sudo systemctl restart newt`** (so the tunnel learns the new target — otherwise Bad Gateway). Full detail:
+`~/Documents/aibo-server/agent-hub/exposure/CLAUDE.md`. Back up `db.sqlite` before any such edit.
 
-To expose it off-box for phone/visual review, mirror the prod `operator` resource. This needs **two
-manual steps** (no automation possible — the Pangolin dashboard has no API and the Cloudflare dashboard
-is Turnstile-walled with no on-box token; same blocker as the Hermes subdomain):
-
-1. **Cloudflare** → add an A record `staging.operator.kingdomofluna.com` → `46.62.218.143` (proxy OFF /
-   DNS-only), OR a wildcard `*.operator.kingdomofluna.com` → `46.62.218.143`.
-2. **Pangolin dashboard** (`https://pangolin.kinifamily.com`) → site **aibo** (id 1) → *Add Resource*:
-   - Hostname/subdomain: `staging.operator.kingdomofluna.com`
-   - Target: `localhost` port **3001** · SSL on · **SSO on** (same auth as prod)
-   - Add the access grant (role → resource) or you'll get 403 "not allowed".
-   Pangolin programs the gerbil/WireGuard route itself — **do NOT hand-edit `db.sqlite`** (raw SQL does
-   NOT program the WG route and the restart cascade risks the live `operator` hub + `register.mb`;
-   CLAUDE.md §4). Values mirror prod resourceId 20 (`~/Documents/aibo-server/agent-hub/exposure/CLAUDE.md`),
-   only the subdomain + internal port (3000→3001) change.
-
-Until those two steps are done, use the SSH tunnel above.
+Local review without the subdomain still works: `ssh -L 3001:localhost:3001 aibo` → `http://localhost:3001/`.
 
 ## Files
 

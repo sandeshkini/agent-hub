@@ -26,6 +26,14 @@ Last updated: 2026-08-08
 
 ## 2. Recently done (this work session)
 
+- **Artifacts + ntfy are now in-house (2026-08-10)** — the artifacts board and the ntfy push bus moved
+  from separate compose projects INTO the hub (`agent-hub/artifacts/`, `agent-hub/ntfy/`), so
+  `docker compose up` stands up the whole stack. Container names + Traefik labels preserved → public URLs
+  (`apps.kingdomofluna.com/artifacts`, `ntfy.kingdomofluna.com`) unchanged, no Pangolin/Cloudflare change.
+  Data dirs gitignored (public repo). Old projects marked `DECOMMISSIONED.md` + their compose files
+  renamed `.decommissioned` so they can't be `up`'d by accident. Verified end-to-end: publish (401
+  unauth / 200 auth → file + ntfy push), board serves all pages, agent→MCP path (`publish_artifact` +
+  `notify`) works. **Still MCP-tool driven** (`mcp-tools`); the in-OWUI publish button is future work.
 - **Cutover-ready push (2026-08-09)** — verified green (14/14 infra + 9/9 functional):
   - **CC-like view (Tier 1)** — subagent internals hidden inline (only the orchestrator shows), each
     subagent = one compact task card; + a 40-card/turn cap so a huge exploration can't build an
@@ -167,9 +175,21 @@ section headers, and time dividers all looked the same. Now there are three tier
 
 ---
 
-## 6. Deferred / next up (as of 2026-08-09 — cutover verified green)
+## 6. Deferred / next up (as of 2026-08-10 — cutover verified green)
 
 **Cutover is safe now** (all adapters + fork verified). These are the known-open items, none blocking:
+
+- **★ Notifications EPIC (NEXT — highest daily value)** — ping the phone via ntfy when an agent **finishes**
+  or **needs input** (needs-input = higher priority; it's a stalled run waiting on you). Build on OWUI's own
+  event/notification system + its "away" mode (quiet while you're actively in the UI) rather than a bespoke
+  one. Make-or-break unknown to prove first: does `chat.finished` fire for our external OpenAI-connection
+  adapters (claude/hermes/opencode/remote nodes) through OWUI's middleware? If yes → all agents work with
+  zero adapter changes. (Tasks #133.)
+- **Artifacts follow-ups** (the migration shipped the board+bus; these make it native):
+  - **OWUI publish button** (#134) — a Publish action in the message/preview UI → board + a permanent link.
+  - **Node-list API** (#135) — hub aggregates artifacts across nodes. Low urgency (needs a 2nd active node).
+  - **Remove the `publish_artifact`/`notify` MCP tools** (#136) — ONLY after the button + notifications
+    replace them, so there's never a window with no way to publish/notify.
 
 - ~~Staging subdomain (`L2b`, #120)~~ — **✅ DONE (2026-08-09):** `staging.operator.kingdomofluna.com` is
   live (Pangolin resource 29 → aibo:3001, cloned from `operator`; wildcard DNS). `owui-fork/DEPLOYING.md`.

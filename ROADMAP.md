@@ -26,6 +26,17 @@ Last updated: 2026-08-08
 
 ## 2. Recently done (this work session)
 
+- **Cutover-ready push (2026-08-09)** — verified green (14/14 infra + 9/9 functional):
+  - **CC-like view (Tier 1)** — subagent internals hidden inline (only the orchestrator shows), each
+    subagent = one compact task card; + a 40-card/turn cap so a huge exploration can't build an
+    unrenderable message.
+  - **Agent Activity View (Tier 2, EPIC complete)** — optional on-demand orchestrator→subagent tree; each
+    row expands to that subagent's tool timeline. `docs/EPIC-agent-activity-view.md`.
+  - **ExitPlanMode** — `/plan` → SDK plan mode → interactive Approve / Keep-planning card.
+  - **Graceful SIGTERM drain on ALL 3 adapters** — a restart mid-turn now flushes a clean close (no more
+    broken/un-typeable chats). Presence heartbeat + `STALE_TTL=90` fix (no false "running" spinners).
+  - **SDK-parity review + build doc** (`owui-claude/README.md`): parity matrix + "check a new Claude Code
+    version" procedure. Adapter loads the same skills + CLAUDE.md as the terminal CLI.
 - **Background subagents now return (2026-08-09)** — the Claude adapter ran one query() per message and
   quit at the first `result`, which tore down parallel/`run_in_background` subagents mid-flight (their
   results never came back). Switched to **streaming-input mode** + a drain loop: track
@@ -150,7 +161,27 @@ section headers, and time dividers all looked the same. Now there are three tier
 
 ## 5. Open questions for you
 
-- **Phase 1 presence layer** — start it now? (It's several build/deploy cycles.)
 - **Sidebar #1–5** — which layout proposals do you want?
-- **Next big feature after Phase 1** — orchestration (A), scheduled agents (B), Slack (C), or
-  memory/RAG (D)?
+- **Next big feature** — orchestration (A, the coordinator agent — the activity view is a building
+  block for it), scheduled agents (B), Slack polish (C), or memory/RAG (D)?
+
+---
+
+## 6. Deferred / next up (as of 2026-08-09 — cutover verified green)
+
+**Cutover is safe now** (all adapters + fork verified). These are the known-open items, none blocking:
+
+- **Staging subdomain** (`L2b`, task #120) — `staging.operator.kingdomofluna.com` needs a manual
+  Cloudflare A record + a Pangolin UI resource (no API; can't be automated). Until then, review staging
+  via `ssh -L 3001:localhost:3001 aibo`. Steps in `owui-fork/DEPLOYING.md`.
+- **MacBook node is stale** (`E5.2`, task #76) — the `mb.*` agents run OLD adapter code; needs a
+  `git pull` + rebuild on the MacBook to get this session's fixes (drains, CC-view, activity, etc.).
+- **Agent Activity View — future ideas** (EPIC done): multi-machine subagents aren't surfaced; nested
+  subagents render flat; only **Claude** posts activity (Hermes/OpenCode don't emit subagent lifecycle).
+- **Behavioral cutover notes** (not bugs): (1) restarting an adapter mid-turn now degrades gracefully
+  (clean "resend" message) but still interrupts that turn — restart when idle; (2) never set durable
+  config in the OWUI Admin UI (`RESET_CONFIG_ON_START=true` wipes it — use `.env`); (3) ship fork changes
+  ONLY via `./owui-fork/deploy.sh`.
+- **Bigger tracks still open**: E8 portable install / multiple Hermes brains / master install.sh / Mac
+  compat (#89–94); Slack `AskUserQuestion` buttons (#100); Phase 2 orchestration; Phase 3 memory/RAG.
+- **TodoWrite** renders as a generic tool card (no dedicated checklist UI) — minor polish if wanted.

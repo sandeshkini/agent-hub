@@ -159,10 +159,13 @@ services:
       - ${WORKSPACE_HOST:-${HOME}}:${WORKSPACE:-${HOME}}
       - ./ff-state:/ffstate
       - /var/run/docker.sock:/var/run/docker.sock     # operate the docker/compose stack
-      # Share the human's config so the hub agent behaves exactly like their local Claude Code —
-      # same global instructions, same settings, writable both ways.
+      # Parity with the human's local Claude Code: same global memory + same skills.
+      # Mirrors what host/install.sh symlinks for the host-run adapter on Linux.
+      # settings.json is deliberately NOT shared — it commonly carries
+      # permissions.defaultMode:"bypassPermissions", which skips canUseTool and would silently break
+      # interactive AskUserQuestion AND the destructive-command guardrail.
       - ${WORKSPACE_HOST:-${HOME}}/.claude/CLAUDE.md:/home/node/.claude/CLAUDE.md
-      - ${WORKSPACE_HOST:-${HOME}}/.claude/settings.json:/home/node/.claude/settings.json
+      - ${WORKSPACE_HOST:-${HOME}}/.claude/skills:/home/node/.claude/skills
     environment:
       CLAUDE_CODE_OAUTH_TOKEN: "${CLAUDE_CODE_OAUTH_TOKEN}"
       ADAPTER_KEY: "${ADAPTER_KEY}"

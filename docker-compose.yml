@@ -26,6 +26,14 @@ services:
     environment: &owui-env         # anchored so open-webui-staging reuses the EXACT same env (no drift)
       WEBUI_NAME: "Aibo Agents"
       WEBUI_AUTH: "false"
+      # Agent → phone push (ntfy) on turn done / needs-input (utils/agent_notify.py). Same bus/topic as
+      # mcp-tools notify; away-gated via Users.is_user_active (only buzzes when you're NOT watching OWUI).
+      NTFY_URL: "${NTFY_URL:-http://ntfy}"
+      NTFY_TOPIC: "${NTFY_TOPIC:-aibo}"
+      NTFY_TOKEN: "${NTFY_TOKEN:-}"
+      AGENT_NTFY_ENABLED: "${AGENT_NTFY_ENABLED:-true}"
+      AGENT_NTFY_DELIVERY: "${AGENT_NTFY_DELIVERY:-away}"   # away | always
+      AGENT_NTFY_CLICK_BASE: "${AGENT_NTFY_CLICK_BASE:-https://operator.kingdomofluna.com}"
       WEBUI_SECRET_KEY: "${WEBUI_SECRET_KEY}"     # PINNED → stable JWT sessions across restarts
       NODE_HUB_TOKEN: "${NODE_HUB_TOKEN:-}"       # gates /api/nodes/register (empty = open, LAN only)
       # Settings→Account→API keys; the slack-gateway needs one for OWUI_API_KEY. NOTE: this only seeds

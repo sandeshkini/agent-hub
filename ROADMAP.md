@@ -179,12 +179,13 @@ section headers, and time dividers all looked the same. Now there are three tier
 
 **Cutover is safe now** (all adapters + fork verified). These are the known-open items, none blocking:
 
-- **★ Notifications EPIC (NEXT — highest daily value)** — ping the phone via ntfy when an agent **finishes**
-  or **needs input** (needs-input = higher priority; it's a stalled run waiting on you). Build on OWUI's own
-  event/notification system + its "away" mode (quiet while you're actively in the UI) rather than a bespoke
-  one. Make-or-break unknown to prove first: does `chat.finished` fire for our external OpenAI-connection
-  adapters (claude/hermes/opencode/remote nodes) through OWUI's middleware? If yes → all agents work with
-  zero adapter changes. (Tasks #133.)
+- ~~**★ Notifications EPIC**~~ — **✅ DONE (2026-08-10):** phone push (ntfy) when an agent **finishes**
+  (priority default) or **needs input** (priority urgent). Away-gated via OWUI's own presence
+  (`Users.is_user_active`, 3-min window) — quiet while you're actively in the UI. Proved the make-or-break:
+  the done signal (`publish_chat_finished_event` in `utils/middleware.py`) is **not** model-gated, so it
+  fires for all external adapters; needs-input rides the `agent_runs` presence registry. Self-contained,
+  env-driven (`AGENT_NTFY_*`), same ntfy bus/topic as `mcp-tools notify`. Full writeup:
+  `docs/EPIC-agent-notifications.md`. (Task #133.)
 - **Artifacts follow-ups** (the migration shipped the board+bus; these make it native):
   - **OWUI publish button** (#134) — a Publish action in the message/preview UI → board + a permanent link.
   - **Node-list API** (#135) — hub aggregates artifacts across nodes. Low urgency (needs a 2nd active node).

@@ -636,10 +636,10 @@ index 0000000..52453d6
 +    return {"deleted": existed}
 diff --git a/backend/open_webui/routers/agent_runs.py b/backend/open_webui/routers/agent_runs.py
 new file mode 100644
-index 0000000..cb456fa
+index 0000000..a7f3a75
 --- /dev/null
 +++ b/backend/open_webui/routers/agent_runs.py
-@@ -0,0 +1,101 @@
+@@ -0,0 +1,131 @@
 +# LOCAL PATCH (agent-hub fork, Phase 1): agent run / question PRESENCE registry.
 +#
 +# Purpose: make it visible, hub-wide, what every agent is doing — and stop a blocked run from becoming
@@ -712,6 +712,7 @@ index 0000000..cb456fa
 +        raise HTTPException(status_code=400, detail="chat_id required")
 +    now = time.time()
 +    r = _runs.get(cid) or {}
++    prev_status = r.get("status")          # capture BEFORE overwrite → detect the needs-input transition
 +    if "status" in body:
 +        r["status"] = body.get("status")
 +        # A finished turn can't still be "waiting for input" — clear any parked question so no stale badge.
@@ -724,7 +725,36 @@ index 0000000..cb456fa
 +    r["updated_at"] = now
 +    _runs[cid] = r
 +    _prune(now)
++
++    # LOCAL PATCH (agent-hub fork): higher-priority phone push when a run BLOCKS on input. Fire only on the
++    # transition INTO needs-input (not on every heartbeat) so the phone buzzes once per parked question.
++    if r.get("status") == "needs-input" and prev_status != "needs-input":
++        try:
++            await _notify_needs_input(cid, r.get("question"))
++        except Exception:
++            pass
 +    return {"ok": True}
++
++
++async def _notify_needs_input(chat_id: str, question) -> None:
++    """Map chat_id → owning user, build a preview, and buzz the phone (away-gated, fail-safe)."""
++    from open_webui.utils.agent_notify import enabled as _ntfy_on, notify_needs_input
++
++    if not _ntfy_on():
++        return
++    from open_webui.models.chats import Chats
++
++    chat = await Chats.get_chat_by_id(chat_id)
++    if not chat:
++        return
++    preview = ""
++    q = question if isinstance(question, dict) else {}
++    questions = q.get("questions")
++    if isinstance(questions, list) and questions and isinstance(questions[0], dict):
++        first = questions[0]
++        preview = str(first.get("question") or first.get("message") or first.get("header") or "")[:300]
++    title = getattr(chat, "title", None) or "Agent needs your input"
++    await notify_needs_input(chat.user_id, chat_id, title, preview or "Waiting for your answer")
 +
 +
 +@router.get("/")
@@ -826,6 +856,158 @@ index 0000000..3ad82bf
 +        except Exception:
 +            pass
 +        return incoming
+diff --git a/backend/open_webui/utils/agent_notify.py b/backend/open_webui/utils/agent_notify.py
+new file mode 100644
+index 0000000..046a1d6
+--- /dev/null
++++ b/backend/open_webui/utils/agent_notify.py
+@@ -0,0 +1,126 @@
++# LOCAL PATCH (agent-hub fork): agent → phone push (ntfy) on done / needs-input.
++#
++# Purpose: buzz the user's phone when a background agent turn FINISHES or when it BLOCKS waiting for
++# input (AskUserQuestion / ExitPlanMode). "needs input" is the higher-priority push — the agent is
++# parked until you answer. Reuses OWUI's own presence signal (`Users.is_user_active`, last_active_at
++# within 3 min) for AWAY-gating: the phone only buzzes when you're NOT actively watching OWUI.
++#
++# Single-user hub → no per-user notification-target config needed. Everything is env-driven and matches
++# the mcp-tools `notify` transport (JSON POST to ntfy root, `Authorization: Bearer <token>`), so it
++# lands on the SAME topic/bus as the rest of the fleet.
++#
++# FAIL-SAFE: every failure here is swallowed. A push must NEVER break a chat turn or a run heartbeat.
++import logging
++import os
++
++import aiohttp
++
++from open_webui.models.users import Users
++
++log = logging.getLogger(__name__)
++
++
++def _flag(name: str, default: str = "true") -> bool:
++    return os.environ.get(name, default).strip().lower() in ("1", "true", "yes", "on")
++
++
++_ENABLED = _flag("AGENT_NTFY_ENABLED", "true")
++_BASE = os.environ.get("NTFY_URL", "http://ntfy").rstrip("/")
++_TOPIC = os.environ.get("NTFY_TOPIC", "aibo")
++_TOKEN = os.environ.get("NTFY_TOKEN", "")
++# away  → only when the user is NOT active in OWUI (default; no noise while you watch)
++# always → every time (useful for testing / if you want a log of every finish)
++_DELIVERY = os.environ.get("AGENT_NTFY_DELIVERY", "away").strip().lower()
++# ntfy priority: 1=min 2=low 3=default 4=high 5=max/urgent
++_PRIO_DONE = int(os.environ.get("AGENT_NTFY_PRIORITY_DONE", "3"))
++_PRIO_INPUT = int(os.environ.get("AGENT_NTFY_PRIORITY_INPUT", "5"))
++_TIMEOUT = float(os.environ.get("AGENT_NTFY_TIMEOUT", "6"))
++# public base for the tap-through link (webui.url may be unset → phone can't open a relative path)
++_CLICK_BASE = os.environ.get("AGENT_NTFY_CLICK_BASE", "").rstrip("/")
++
++
++def enabled() -> bool:
++    return bool(_ENABLED and _BASE and _TOPIC)
++
++
++def _click(chat_id: str | None) -> str | None:
++    if not chat_id or not _CLICK_BASE:
++        return None
++    return f"{_CLICK_BASE}/c/{chat_id}"
++
++
++async def _should_send(user_id: str | None) -> bool:
++    if _DELIVERY == "always":
++        return True
++    if not user_id:
++        return True  # can't determine presence → fail-open (better a stray push than a missed one)
++    try:
++        return not await Users.is_user_active(user_id)
++    except Exception:
++        return True
++
++
++async def _post(payload: dict) -> bool:
++    headers = {"Content-Type": "application/json"}
++    if _TOKEN:
++        headers["Authorization"] = f"Bearer {_TOKEN}"
++    try:
++        async with aiohttp.ClientSession() as s:
++            async with s.post(
++                _BASE + "/", json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=_TIMEOUT)
++            ) as r:
++                if r.status >= 400:
++                    log.warning("agent ntfy failed: HTTP %s", r.status)
++                    return False
++                return True
++    except Exception as e:
++        log.warning("agent ntfy error: %s", e)
++        return False
++
++
++async def _notify(
++    *,
++    title: str,
++    message: str,
++    priority: int,
++    tags: list[str],
++    chat_id: str | None,
++    user_id: str | None,
++) -> bool:
++    if not enabled():
++        return False
++    if not await _should_send(user_id):
++        return False
++    payload = {
++        "topic": _TOPIC,
++        "title": (title or "Agent")[:200],
++        "message": (message or "")[:1200] or " ",
++        "priority": priority,
++        "tags": tags,
++    }
++    click = _click(chat_id)
++    if click:
++        payload["click"] = click
++    return await _post(payload)
++
++
++async def notify_done(user_id: str | None, chat_id: str | None, title: str, message: str) -> bool:
++    return await _notify(
++        title=title or "Agent finished",
++        message=message or "Turn complete",
++        priority=_PRIO_DONE,
++        tags=["white_check_mark"],
++        chat_id=chat_id,
++        user_id=user_id,
++    )
++
++
++async def notify_needs_input(user_id: str | None, chat_id: str | None, title: str, message: str) -> bool:
++    return await _notify(
++        title=title or "Agent needs your input",
++        message=message or "Waiting for your answer",
++        priority=_PRIO_INPUT,
++        tags=["bell"],
++        chat_id=chat_id,
++        user_id=user_id,
++    )
+diff --git a/backend/open_webui/utils/middleware.py b/backend/open_webui/utils/middleware.py
+index 271d072..1385984 100644
+--- a/backend/open_webui/utils/middleware.py
++++ b/backend/open_webui/utils/middleware.py
+@@ -173,6 +173,15 @@ async def publish_chat_finished_event(
+         folder_id = metadata.get('folder_id') or await Chats.get_chat_folder_id(chat_id, metadata.get('user_id'))
+         await event_emitter({'type': 'chat:list', 'data': {'chat_id': chat_id, 'folder_id': folder_id}})
+ 
++    # LOCAL PATCH (agent-hub fork): phone push (ntfy) on turn finish — away-gated, fail-safe.
++    try:
++        from open_webui.utils.agent_notify import enabled as _ntfy_on, notify_done
++
++        if _ntfy_on():
++            await notify_done(user.id, chat_id, title, content)
++    except Exception:
++        log.debug('agent ntfy done-hook failed', exc_info=True)
++
+ 
+ # We believe in one maker of all models, seen and unseen,
+ # and in the reasoning which proceeds from the architect.
 diff --git a/src/lib/components/chat/AgentActivity.svelte b/src/lib/components/chat/AgentActivity.svelte
 new file mode 100644
 index 0000000..6ba79eb

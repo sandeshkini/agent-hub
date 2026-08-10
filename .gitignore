@@ -18,3 +18,12 @@ owui-fork/upstream/
 __pycache__/
 *.pyc
 owui-claude/package-lock.json
+
+# ── USER DATA — this repo is PUBLIC. Never commit either of these. ──
+# Published artifacts are your own notes/summaries/mini-apps (can contain host detail, paths, keys).
+# The code that serves them IS tracked; the content is not.
+artifacts/content/
+!artifacts/content/.gitkeep
+# ntfy state: user.db IS the access-control database (NTFY_AUTH_DEFAULT_ACCESS=deny-all).
+# Committing it would publish your notification credentials.
+ntfy/data/

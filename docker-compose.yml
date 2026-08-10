@@ -246,6 +246,70 @@ services:
     volumes:
       - ollama:/root/.ollama
 
+  # ── ARTIFACTS — the publish board (durable pages: summaries + mini-apps) ──────────────────
+  # Relocated INTO agent-hub (was a standalone compose project in ~/Documents/apps/artifacts).
+  # Routing is by container_name + Traefik labels on the external `apps` network, NOT by compose
+  # project — so keeping the name `artifacts` means the public URL is unchanged by the move.
+  # Runs on nodes too: each machine serves its OWN board, and the hub aggregates them (see node/).
+  # DATA: ./artifacts/content is gitignored (public repo — published pages are personal).
+  artifacts:
+    build: ./artifacts
+    image: agent-hub/artifacts
+    container_name: artifacts
+    profiles: ["hub", "node"]
+    restart: unless-stopped
+    environment:
+      BASE_PATH: "${ARTIFACTS_BASE_PATH:-/artifacts}"    # external prefix; traefik strips it
+      PUBLIC_BASE: "${ARTIFACTS_PUBLIC_BASE:-https://apps.kingdomofluna.com}"
+      PUBLISH_TOKEN: "${PUBLISH_TOKEN}"                  # gates POST /api/publish
+      NTFY_URL: "${NTFY_URL:-http://ntfy:80}"            # container→container, no public round-trip
+      NTFY_TOPIC: "${NTFY_TOPIC}"
+      NTFY_TOKEN: "${NTFY_TOKEN}"
+    volumes:
+      - ${ARTIFACTS_CONTENT:-./artifacts/content}:/content
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.artifacts.rule=Host(`${ARTIFACTS_DOMAIN:-apps.kingdomofluna.com}`) && PathPrefix(`${ARTIFACTS_BASE_PATH:-/artifacts}`)"
+      - "traefik.http.middlewares.artifacts-strip.stripprefix.prefixes=${ARTIFACTS_BASE_PATH:-/artifacts}"
+      - "traefik.http.routers.artifacts.middlewares=artifacts-strip"
+      - "traefik.http.services.artifacts.loadbalancer.server.port=8080"
+    networks:
+      - default
+      - apps
+
+  # ── NTFY — the notification bus (push to phone; agent-complete / needs-input alerts) ───────
+  # Relocated INTO agent-hub (was ~/Documents/docker/ntfy). HUB-ONLY: one bus for the fleet;
+  # nodes push to the hub's ntfy rather than running their own.
+  # DATA: ./ntfy/data/lib/user.db IS the access-control DB (NTFY_AUTH_DEFAULT_ACCESS=deny-all).
+  # It is gitignored and MUST be preserved across moves or every client starts getting 403s.
+  ntfy:
+    image: binwiederhier/ntfy
+    container_name: ntfy
+    command: serve
+    profiles: ["hub"]
+    restart: unless-stopped
+    environment:
+      NTFY_BASE_URL: "${NTFY_PUBLIC_URL:-https://ntfy.kingdomofluna.com}"
+      NTFY_UPSTREAM_BASE_URL: "https://ntfy.sh"        # iOS push relay (instant delivery on iPhone)
+      NTFY_BEHIND_PROXY: "true"
+      NTFY_AUTH_FILE: "/var/lib/ntfy/user.db"
+      NTFY_AUTH_DEFAULT_ACCESS: "deny-all"             # fail-closed: no anonymous read/write
+      NTFY_CACHE_FILE: "/var/cache/ntfy/cache.db"
+      NTFY_ATTACHMENT_CACHE_DIR: "/var/cache/ntfy/attachments"
+      TZ: "${TZ:-America/Toronto}"
+    ports:
+      - "${NTFY_PORT:-8095}:80"                        # host + LAN access
+    volumes:
+      - ${NTFY_DATA:-./ntfy/data}/lib:/var/lib/ntfy
+      - ${NTFY_DATA:-./ntfy/data}/cache:/var/cache/ntfy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.ntfy.rule=Host(`${NTFY_DOMAIN:-ntfy.kingdomofluna.com}`)"
+      - "traefik.http.services.ntfy.loadbalancer.server.port=80"
+    networks:
+      - default
+      - apps
+
   # ONE shared MCP server: publish_artifact + notify for ALL agents. Tool logic lives here.
   mcp-tools:
     build: ./mcp-tools

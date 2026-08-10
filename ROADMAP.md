@@ -187,10 +187,16 @@ section headers, and time dividers all looked the same. Now there are three tier
   env-driven (`AGENT_NTFY_*`), same ntfy bus/topic as `mcp-tools notify`. Full writeup:
   `docs/EPIC-agent-notifications.md`. (Task #133.)
 - **Artifacts follow-ups** (the migration shipped the board+bus; these make it native):
-  - **OWUI publish button** (#134) — a Publish action in the message/preview UI → board + a permanent link.
-  - **Node-list API** (#135) — hub aggregates artifacts across nodes. Low urgency (needs a 2nd active node).
-  - **Remove the `publish_artifact`/`notify` MCP tools** (#136) — ONLY after the button + notifications
-    replace them, so there's never a window with no way to publish/notify.
+  - ~~**OWUI publish button** (#134)~~ — **✅ DONE (2026-08-10):** Share button on every assistant reply →
+    `POST /api/v1/artifacts/publish` (fork proxies to the board with the server-side token) → shareable
+    page + phone push + opens. `docs/EPIC-artifacts-publish.md`.
+  - ~~**Node-list API** (#135)~~ — **✅ DONE (2026-08-10):** `GET /api/v1/artifacts/list` (board as JSON,
+    absolute URLs). Board is hub-only (all machines publish to it) → this IS the cross-machine aggregation.
+  - **Remove the `publish_artifact`/`notify` MCP tools** (#136) — **PENDING A SCOPE DECISION.** Button +
+    auto-notifications replace MANUAL use, but the MCP tools are the only path for **autonomous agent**
+    publish/notify (scheduled Automation personas, e.g. a daily portfolio brief). Options: keep both
+    (recommended — nothing lost) · retire `publish_artifact` only (keep `notify` for custom alerts) ·
+    retire both fully (cleanest, but Automations lose auto-publish/alert). Reversible either way.
 
 - ~~Staging subdomain (`L2b`, #120)~~ — **✅ DONE (2026-08-09):** `staging.operator.kingdomofluna.com` is
   live (Pangolin resource 29 → aibo:3001, cloned from `operator`; wildcard DNS). `owui-fork/DEPLOYING.md`.

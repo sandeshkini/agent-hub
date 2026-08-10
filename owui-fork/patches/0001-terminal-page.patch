@@ -718,7 +718,7 @@ index 0000000..3ad82bf
 +        return incoming
 diff --git a/src/lib/components/chat/AgentQuestion.svelte b/src/lib/components/chat/AgentQuestion.svelte
 new file mode 100644
-index 0000000..2cca353
+index 0000000..1d124cf
 --- /dev/null
 +++ b/src/lib/components/chat/AgentQuestion.svelte
 @@ -0,0 +1,105 @@
@@ -797,7 +797,7 @@ index 0000000..2cca353
 +	{#each item.questions ?? [] as q, qi}
 +		<div class="mb-3 last:mb-0">
 +			{#if q?.header}<div class="text-[11px] uppercase tracking-wide text-gray-400 mb-0.5">{q.header}</div>{/if}
-+			<div class="text-sm font-medium mb-1.5">{qText(q)}</div>
++			<div class="text-sm whitespace-pre-wrap max-h-80 overflow-y-auto mb-1.5">{qText(q)}</div>
 +			<div class="flex flex-col gap-1.5">
 +				{#each q?.options ?? [] as opt}
 +					<button

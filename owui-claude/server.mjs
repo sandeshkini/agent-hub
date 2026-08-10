@@ -106,6 +106,38 @@ function makeCanUseTool(chatId, ctx) {
     if ((tool === "Bash" || tool === "Shell") && isDestructive(input)) {
       return { behavior: "deny", message: "BLOCKED by system-safety guardrail: irreversible/system-destroying command is forbidden." };
     }
+    if (tool === "ExitPlanMode") {
+      // Plan approval. Interactive: show the plan + Approve / Keep-planning buttons (reuse the question card).
+      if (ctx && ctx.interactive && ctx.mid && ctx.jwt) {
+        const plan = String(input?.plan || "").trim() || "(the agent proposed a plan)";
+        const qid = randId();
+        const questions = [{
+          header: "Plan review",
+          question: plan,
+          options: [
+            { label: "Approve & execute", description: "Proceed with this plan" },
+            { label: "Keep planning", description: "Don't execute yet — refine it" },
+          ],
+          multiSelect: false,
+        }];
+        await emitQuestionEvent(chatId, ctx.mid, ctx.jwt, qid, questions);
+        postRun(chatId, { status: "needs-input", question: { id: qid, message_id: ctx.mid, questions } });
+        ctx.onWait && ctx.onWait();
+        const answers = await new Promise((resolve) => {
+          const timer = setTimeout(() => { pendingQ.delete(qid); resolve(null); }, ANSWER_TIMEOUT);
+          pendingQ.set(qid, { resolve, timer });
+        });
+        ctx.onResume && ctx.onResume();
+        postRun(chatId, { status: "running", question: null });
+        const pick = answers ? Object.values(answers)[0] : null;
+        const val = Array.isArray(pick) ? pick[0] : pick;
+        if (typeof val === "string" && /keep planning/i.test(val)) {
+          return { behavior: "deny", message: "The user chose to keep planning — do NOT execute. Revise the plan per any feedback and present an updated plan via ExitPlanMode." };
+        }
+        return { behavior: "allow" };   // approved (or timed out) → exit plan mode and execute
+      }
+      return { behavior: "allow" };     // non-interactive (fire-and-forget) → auto-approve so the turn proceeds
+    }
     if (tool === "AskUserQuestion" && ctx && ctx.interactive && ctx.mid && ctx.jwt && Array.isArray(input?.questions)) {
       const qid = randId();
       await emitQuestionEvent(chatId, ctx.mid, ctx.jwt, qid, input.questions);
@@ -213,12 +245,18 @@ async function* streamTurn(chatId, model, messages, ctx = {}) {
   const um = lastUser(messages);
   if (!um) { yield { content: "_(no user message)_" }; return; }
   const sys = systemOf(messages);
+  // PLAN MODE (ExitPlanMode): a turn whose user message starts with `/plan` (or `plan:`) runs in the SDK's
+  // plan permission mode — the model researches read-only, then calls ExitPlanMode, which makeCanUseTool
+  // surfaces as an interactive Approve / Keep-planning card. Approve → it executes; keep-planning → revise.
+  const planMode = /^\s*\/?plan[:!]?\s/i.test(textOf(um.content));
   // Resume ONLY when we have a stable chat id. The old content-prefix fallback ("h:"+first-40-chars)
   // collided across unrelated conversations that shared an opening phrase → one chat could resume
   // another's Claude session (cross-conversation context leak). No chat id ⇒ fresh session, no resume.
   const conv = chatId ? "id:" + chatId : null;
   const resume = conv ? cacheGet(conv) : undefined;
   let prompt = buildPrompt(um);
+  // Strip the `/plan` trigger from what the model sees (it drives permissionMode, not a literal command).
+  if (planMode && typeof prompt === "string") prompt = prompt.replace(/^\s*\/?plan[:!]?\s+/i, "");
   // CONTEXT CONTINUITY: within one container lifetime we resume the SDK session (full context, cheap).
   // But that cache is IN-MEMORY, so a container restart (every deploy) or an LRU eviction drops it — and
   // we were sending ONLY the last user message, so Claude saw "the start of our conversation" and lost
@@ -263,7 +301,7 @@ async function* streamTurn(chatId, model, messages, ctx = {}) {
       : (process.env.CLAUDE_SKILLS || "").split(",").map((s) => s.trim()).filter(Boolean),
     // Pin the permission mode so canUseTool ALWAYS runs (interactive AskUserQuestion + guardrail),
     // independent of any defaultMode a loaded settings source might carry.
-    permissionMode: process.env.CLAUDE_PERMISSION_MODE || "default",
+    permissionMode: planMode ? "plan" : (process.env.CLAUDE_PERMISSION_MODE || "default"),
     // Belt-and-suspenders: the guardrail is ALSO a PreToolUse hook (fires regardless of permission mode).
     // $WORKSPACE is the real host home mounted rw, so this deterministic block matters.
     hooks: {

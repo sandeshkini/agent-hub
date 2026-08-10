@@ -1,8 +1,8 @@
 diff --git a/backend/open_webui/main.py b/backend/open_webui/main.py
-index 55613ac..48b71a0 100644
+index 55613ac..ce12845 100644
 --- a/backend/open_webui/main.py
 +++ b/backend/open_webui/main.py
-@@ -138,6 +138,11 @@ from open_webui.models.models import Models
+@@ -138,6 +138,12 @@ from open_webui.models.models import Models
  from open_webui.models.users import Users
  from open_webui.routers import (
      analytics,
@@ -11,10 +11,11 @@ index 55613ac..48b71a0 100644
 +    agent_answer,  # LOCAL PATCH (agent-hub fork): AskUserQuestion answer relay (E7)
 +    agent_terminal_sync,  # LOCAL PATCH (agent-hub fork): cross-device terminal-session sync
 +    agent_runs,  # LOCAL PATCH (agent-hub fork, Phase 1): run/question presence registry
++    agent_activity,  # LOCAL PATCH (agent-hub fork, Tier 2): per-subagent activity tree registry
      audio,
      auths,
      automations,
-@@ -822,6 +827,13 @@ if ENABLE_ADMIN_ANALYTICS:
+@@ -822,6 +828,14 @@ if ENABLE_ADMIN_ANALYTICS:
  app.include_router(utils.router, prefix='/api/v1/utils', tags=['utils'])
  app.include_router(terminals.router, prefix='/api/v1/terminals', tags=['terminals'])
  app.include_router(automations.router, prefix='/api/v1/automations', tags=['automations'])
@@ -25,6 +26,7 @@ index 55613ac..48b71a0 100644
 +app.include_router(agent_answer.router, prefix='/api/v1/agent', tags=['agent'])  # LOCAL PATCH (E7)
 +app.include_router(agent_terminal_sync.router, prefix='/api/v1/terminal-sessions', tags=['terminals'])  # LOCAL PATCH
 +app.include_router(agent_runs.router, prefix='/api/v1/agent-runs', tags=['agent'])  # LOCAL PATCH (Phase 1)
++app.include_router(agent_activity.router, prefix='/api/v1/agent-activity', tags=['agent'])  # LOCAL PATCH (Tier 2)
  app.include_router(calendar.router, prefix='/api/v1/calendars', tags=['calendars'])
  
  # SCIM 2.0 API for identity management
@@ -168,6 +170,90 @@ index 26e9dd3..608d854 100644
                      }
                  )
                  for chat in all_chats
+diff --git a/backend/open_webui/routers/agent_activity.py b/backend/open_webui/routers/agent_activity.py
+new file mode 100644
+index 0000000..f22cb5c
+--- /dev/null
++++ b/backend/open_webui/routers/agent_activity.py
+@@ -0,0 +1,78 @@
++# LOCAL PATCH (agent-hub fork, EPIC Agent Activity View / Tier 2): per-subagent ACTIVITY registry.
++#
++# Purpose: an OPTIONAL, on-demand view of the orchestrator→subagent tree. The main chat stays clean (Tier 1
++# hides subagent internals); this registry lets the UI show a collapsible tree of the subagents a turn spun
++# up — type, status, a one-line summary, tool count — updating live. It does NOT hold transcripts (those are
++# fetched on demand from the adapter; see owui-claude /subagent/<sid>/<agent>).
++#
++# Writers = the adapters (Bearer ADAPTER_KEY): they POST a record per subagent on task_started / _progress /
++# _notification. Reader = the browser (JWT): GET /?chat_id=<id> returns that chat's subagents. In-memory,
++# best-effort, pruned by TTL — exactly like agent_runs.py.
++import hmac
++import os
++import time
++
++from fastapi import APIRouter, Depends, HTTPException, Request
++
++from open_webui.utils.auth import get_verified_user
++
++router = APIRouter()
++
++ADAPTER_KEY = os.environ.get("ADAPTER_KEY", "")
++# Drop a chat's whole activity set this long after its last update (a turn finished + nobody's looking).
++STALE_TTL = int(os.environ.get("AGENT_ACTIVITY_STALE_TTL", "1800"))
++
++# chat_id -> { updated_at, tasks: { task_id -> {task_id, subagent_type, status, summary, tool_count,
++#                                              parent_tool_use_id, session_id, agent_id, started_at, updated_at} } }
++_activity: dict = {}
++
++
++def _adapter_ok(request: Request) -> bool:
++    # SECURITY (fail-CLOSED): empty ADAPTER_KEY denies; constant-time compare.
++    if not ADAPTER_KEY:
++        return False
++    h = request.headers.get("authorization", "")
++    tok = h[7:].strip() if h.lower().startswith("bearer ") else ""
++    return hmac.compare_digest(tok, ADAPTER_KEY)
++
++
++def _prune(now: float | None = None) -> None:
++    now = now or time.time()
++    drop = [cid for cid, c in _activity.items() if now - c.get("updated_at", 0) > STALE_TTL]
++    for cid in drop:
++        _activity.pop(cid, None)
++
++
++@router.post("/")
++async def set_activity(request: Request):
++    """Adapters upsert a subagent's activity record (machine-to-machine)."""
++    if not _adapter_ok(request):
++        raise HTTPException(status_code=401, detail="unauthorized")
++    try:
++        body = await request.json()
++    except Exception:
++        raise HTTPException(status_code=400, detail="invalid json")
++    cid = (body.get("chat_id") or "").strip()
++    tid = (body.get("task_id") or "").strip()
++    if not cid or not tid:
++        raise HTTPException(status_code=400, detail="chat_id and task_id required")
++    now = time.time()
++    chat = _activity.setdefault(cid, {"updated_at": now, "tasks": {}})
++    t = chat["tasks"].setdefault(tid, {"task_id": tid, "started_at": now})
++    for k in ("subagent_type", "status", "summary", "tool_count", "parent_tool_use_id",
++              "session_id", "agent_id", "description"):
++        if k in body:
++            t[k] = body.get(k)
++    t["updated_at"] = now
++    chat["updated_at"] = now
++    _prune(now)
++    return {"ok": True}
++
++
++@router.get("/")
++async def get_activity(chat_id: str, user=Depends(get_verified_user)):
++    """Browser: the subagent tree for one chat, newest first."""
++    _prune()
++    chat = _activity.get((chat_id or "").strip())
++    tasks = sorted((chat or {}).get("tasks", {}).values(), key=lambda x: x.get("started_at", 0))
++    return {"chat_id": chat_id, "tasks": tasks}
 diff --git a/backend/open_webui/routers/agent_answer.py b/backend/open_webui/routers/agent_answer.py
 new file mode 100644
 index 0000000..ee17b5d
@@ -716,6 +802,73 @@ index 0000000..3ad82bf
 +        except Exception:
 +            pass
 +        return incoming
+diff --git a/src/lib/components/chat/AgentActivity.svelte b/src/lib/components/chat/AgentActivity.svelte
+new file mode 100644
+index 0000000..2e4cbf8
+--- /dev/null
++++ b/src/lib/components/chat/AgentActivity.svelte
+@@ -0,0 +1,61 @@
++<script lang="ts">
++	// LOCAL PATCH (agent-hub fork, Tier 2 — Agent Activity View): a collapsible orchestrator→subagent tree.
++	// Off by default (a small "🧩 N subagents" affordance); expand to see each subagent's type, status,
++	// description, tool count + one-line summary. Live-updates via the agentActivity store while running.
++	// The MAIN chat stays clean (Tier 1 hides subagent internals) — this is the optional way to inspect them.
++	import { onDestroy } from 'svelte';
++	import { agentActivity, loadActivity, pollActivity, stopPollActivity } from '$lib/utils/agentActivity';
++
++	export let chatId: string = '';
++
++	let open = false;
++	let tracked = '';
++
++	// (re)load + poll whenever the chat changes
++	$: if (chatId && chatId !== tracked) {
++		if (tracked) stopPollActivity(tracked);
++		tracked = chatId;
++		loadActivity(chatId);
++		pollActivity(chatId);
++	}
++	onDestroy(() => tracked && stopPollActivity(tracked));
++
++	$: tasks = ($agentActivity ?? {})[chatId] ?? [];
++	$: running = tasks.filter((t) => t?.status === 'running').length;
++
++	const dotClass = (s?: string) =>
++		s === 'running'
++			? 'bg-blue-500 animate-pulse'
++			: s === 'failed' || s === 'stopped'
++				? 'bg-red-500'
++				: 'bg-green-500';
++</script>
++
++{#if tasks.length}
++	<div class="my-2 text-xs">
++		<button
++			type="button"
++			class="flex items-center gap-1.5 text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition"
++			on:click={() => (open = !open)}
++		>
++			<span>🧩 {tasks.length} subagent{tasks.length === 1 ? '' : 's'}{running ? ` · ${running} running` : ''}</span>
++			<span class="transition-transform duration-150 {open ? 'rotate-90' : ''}">›</span>
++		</button>
++
++		{#if open}
++			<div class="mt-1.5 ml-1 border-l border-gray-200 dark:border-gray-800 pl-3 flex flex-col gap-1.5">
++				{#each tasks as t (t.task_id)}
++					<div class="flex items-start gap-2">
++						<span class="mt-[5px] size-1.5 rounded-full shrink-0 {dotClass(t.status)}"></span>
++						<div class="min-w-0">
++							<div class="text-gray-700 dark:text-gray-300 truncate">
++								<span class="font-medium">{t.subagent_type ?? 'subagent'}</span>{#if t.description}<span class="text-gray-500 dark:text-gray-400"> · {t.description}</span>{/if}{#if t.tool_count}<span class="text-gray-400"> · {t.tool_count} tool{t.tool_count === 1 ? '' : 's'}</span>{/if}
++							</div>
++							{#if t.summary}<div class="text-gray-500 dark:text-gray-500 truncate">{t.summary}</div>{/if}
++						</div>
++					</div>
++				{/each}
++			</div>
++		{/if}
++	</div>
++{/if}
 diff --git a/src/lib/components/chat/AgentQuestion.svelte b/src/lib/components/chat/AgentQuestion.svelte
 new file mode 100644
 index 0000000..1d124cf
@@ -828,19 +981,20 @@ index 0000000..1d124cf
 +	</div>
 +</div>
 diff --git a/src/lib/components/chat/Chat.svelte b/src/lib/components/chat/Chat.svelte
-index 87a4029..575e689 100644
+index 87a4029..9493a71 100644
 --- a/src/lib/components/chat/Chat.svelte
 +++ b/src/lib/components/chat/Chat.svelte
-@@ -102,6 +102,8 @@
+@@ -102,6 +102,9 @@
  
  	import Banner from '../common/Banner.svelte';
  	import MessageInput from '$lib/components/chat/MessageInput.svelte';
 +	import AgentQuestion from '$lib/components/chat/AgentQuestion.svelte'; // LOCAL PATCH (E7)
 +	import { agentQuestions, addQuestion } from '$lib/utils/agentQuestions'; // LOCAL PATCH (E7)
++	import AgentActivity from '$lib/components/chat/AgentActivity.svelte'; // LOCAL PATCH (Tier 2)
  	import Messages from '$lib/components/chat/Messages.svelte';
  	import Navbar from '$lib/components/chat/Navbar.svelte';
  	import ChatControls from './ChatControls.svelte';
-@@ -1126,6 +1128,11 @@
+@@ -1126,6 +1129,11 @@
  					eventConfirmationInputValue = data?.value ?? '';
  					eventConfirmationInputType = data?.input?.type ?? data?.type ?? '';
  					eventConfirmationInputOptions = data?.input?.options ?? data?.options ?? [];
@@ -852,7 +1006,7 @@ index 87a4029..575e689 100644
  				} else if (type.startsWith('terminal:')) {
  					terminalEventHandler(type, data);
  				} else {
-@@ -1133,6 +1140,7 @@
+@@ -1133,6 +1141,7 @@
  				}
  
  				history.messages[event.message_id] = message;
@@ -860,7 +1014,7 @@ index 87a4029..575e689 100644
  			}
  		} else {
  			// Non-active chat completion: queue stays in the global store.
-@@ -1939,6 +1947,43 @@
+@@ -1939,6 +1948,43 @@
  		setTimeout(() => chatInput?.focus(), 0);
  	};
  
@@ -904,7 +1058,7 @@ index 87a4029..575e689 100644
  	const loadChat = async () => {
  		noteChatDebug('loadChat start');
  		// chatIdProp is empty for chats started from the home page (URL set via replaceState)
-@@ -2019,6 +2064,9 @@
+@@ -2019,6 +2065,9 @@
  				// nodes from failed regenerations (#24424, #24157, #20474)
  				sanitizeHistory(history);
  
@@ -914,7 +1068,7 @@ index 87a4029..575e689 100644
  				chatTitle.set(chatContent.title);
  
  				params = structuredClone(chatContent?.params ?? {});
-@@ -3138,7 +3186,12 @@
+@@ -3138,7 +3187,12 @@
  				filter_ids: selectedFilterIds.length > 0 ? selectedFilterIds : undefined,
  				tool_ids: toolIds.length > 0 ? toolIds : undefined,
  				skill_ids: skillIds.length > 0 ? skillIds : undefined,
@@ -928,7 +1082,7 @@ index 87a4029..575e689 100644
  				tool_servers: [
  					...($toolServers ?? []).filter(
  						(server, idx) => toolServerIds.includes(idx) || toolServerIds.includes(server?.id)
-@@ -3946,6 +3999,14 @@
+@@ -3946,6 +4000,20 @@
  									</div>
  								</div>
  							{:else}
@@ -938,6 +1092,12 @@ index 87a4029..575e689 100644
 +										{#each $agentQuestions[$chatId] as q (q.id)}
 +											<AgentQuestion chatId={$chatId} item={q} />
 +										{/each}
++									</div>
++								{/if}
++								<!-- LOCAL PATCH (Tier 2): orchestrator→subagent activity tree (renders nothing if no subagents) -->
++								{#if $chatId}
++									<div class="w-full max-w-5xl mx-auto px-2.5">
++										<AgentActivity chatId={$chatId} />
 +									</div>
 +								{/if}
  								<div
@@ -1735,6 +1895,72 @@ index cf55bd8..dff14e0 100644
  						aria-expanded={open}
  						aria-controls="{id}-content"
  						on:pointerup|stopPropagation
+diff --git a/src/lib/utils/agentActivity.ts b/src/lib/utils/agentActivity.ts
+new file mode 100644
+index 0000000..cdd63cb
+--- /dev/null
++++ b/src/lib/utils/agentActivity.ts
+@@ -0,0 +1,60 @@
++// LOCAL PATCH (agent-hub fork, Tier 2 — Agent Activity View): store for the per-chat subagent tree.
++// Reads GET /api/v1/agent-activity/?chat_id=<id> (populated by the adapters on task_started/_progress/
++// _notification). Polls while any subagent is running, then stops. Best-effort — empty = no activity.
++import { WEBUI_API_BASE_URL } from '$lib/constants';
++import { writable } from 'svelte/store';
++
++export type SubagentTask = {
++	task_id: string;
++	subagent_type?: string;
++	status?: string; // running | done | failed | stopped
++	summary?: string;
++	description?: string;
++	tool_count?: number;
++	session_id?: string;
++	agent_id?: string;
++	started_at?: number;
++};
++
++// chatId -> tasks[]
++export const agentActivity = writable<Record<string, SubagentTask[]>>({});
++
++const timers: Record<string, any> = {};
++
++export const loadActivity = async (chatId: string): Promise<SubagentTask[]> => {
++	if (!chatId) return [];
++	try {
++		const r = await fetch(
++			`${WEBUI_API_BASE_URL}/agent-activity/?chat_id=${encodeURIComponent(chatId)}`,
++			{ headers: { Authorization: `Bearer ${localStorage.getItem('token') ?? ''}` } }
++		);
++		if (!r.ok) return [];
++		const d = await r.json();
++		const tasks: SubagentTask[] = Array.isArray(d?.tasks) ? d.tasks : [];
++		agentActivity.update((m) => ({ ...m, [chatId]: tasks }));
++		return tasks;
++	} catch {
++		return [];
++	}
++};
++
++// Poll while any subagent is running; stop once they've all settled.
++export const pollActivity = (chatId: string) => {
++	if (!chatId || timers[chatId]) return;
++	const tick = async () => {
++		const tasks = await loadActivity(chatId);
++		if (tasks.some((t) => t?.status === 'running')) {
++			timers[chatId] = setTimeout(tick, 2500);
++		} else {
++			stopPollActivity(chatId);
++		}
++	};
++	tick();
++};
++
++export const stopPollActivity = (chatId: string) => {
++	if (timers[chatId]) {
++		clearTimeout(timers[chatId]);
++		delete timers[chatId];
++	}
++};
 diff --git a/src/lib/utils/agentInbox.ts b/src/lib/utils/agentInbox.ts
 new file mode 100644
 index 0000000..e23d4aa

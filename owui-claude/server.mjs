@@ -99,6 +99,19 @@ function postRun(chatId, patch) {
   } catch {}
 }
 
+// Tier 2 (Agent Activity View): upsert a subagent's activity record into the fork's /agent-activity tree.
+// Fire-and-forget; requires a task_id. The UI reads GET /agent-activity/?chat_id=<id> for the tree.
+function postActivity(chatId, patch) {
+  if (!chatId || !ADAPTER_KEY || !patch || !patch.task_id) return;
+  try {
+    fetch(`${OWUI_BASE}/api/v1/agent-activity/`, {
+      method: "POST",
+      headers: { "Authorization": `Bearer ${ADAPTER_KEY}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId, ...patch }),
+    }).catch(() => {});
+  } catch {}
+}
+
 // Per-turn canUseTool: guardrail always; interactive AskUserQuestion only when a browser is attached
 // (ctx.interactive with mid+jwt). Non-stream / fire-and-forget runs auto-allow (no one to ask).
 function makeCanUseTool(chatId, ctx) {
@@ -414,15 +427,22 @@ async function* streamTurn(chatId, model, messages, ctx = {}) {
       else if (m.type === "system" && m.subtype === "task_started") {
         // a subagent/background task launched — show it so the fan-out is visible in chat.
         usedBackground = true; drainPending = false;
+        postActivity(chatId, { task_id: m.task_id, subagent_type: m.subagent_type, description: m.description, status: "running" });
         yield { content: `\n_↳ subagent started${m.subagent_type ? ` (${m.subagent_type})` : ""}${m.description ? `: ${m.description}` : ""}_\n` };
       }
       else if (m.type === "system" && m.subtype === "task_notification") {
         // a background task finished; the SDK re-invokes the model to use its result.
         drainPending = false;
+        const st = m.status === "completed" ? "done" : m.status === "failed" ? "failed" : "stopped";
+        const agentId = (String(m.output_file || "").match(/agent-([0-9a-f]+)\.jsonl/) || [])[1];
+        postActivity(chatId, { task_id: m.task_id, status: st, summary: m.summary, tool_count: m.usage && m.usage.tool_uses, session_id: m.session_id, agent_id: agentId });
         const icon = m.status === "completed" ? "✓" : m.status === "failed" ? "✗" : "◦";
         yield { content: `\n_${icon} subagent ${m.status || "done"}${m.summary ? `: ${m.summary}` : ""}_\n` };
       }
-      else if (m.type === "system" && m.subtype === "task_progress") { drainPending = false; }   // periodic — kept silent (too frequent)
+      else if (m.type === "system" && m.subtype === "task_progress") {
+        drainPending = false;   // periodic — kept silent in chat, but feeds the activity tree
+        postActivity(chatId, { task_id: m.task_id, subagent_type: m.subagent_type, status: "running", summary: m.summary, tool_count: m.usage && m.usage.tool_uses });
+      }
       else if (m.type === "system" && m.subtype === "compact_boundary") {
         yield { content: `\n_🗜 context compacted (older history summarized to fit the window)_\n` };
       }

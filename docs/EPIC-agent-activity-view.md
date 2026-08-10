@@ -1,7 +1,24 @@
 # EPIC — Agent Activity View (orchestrator → subagent tree)
 
-Status: **planned** · Owner: — · Depends on: Phase-1 presence (`agent-runs`, shipped) + the CC-like view
-(Tier 1, shipped).
+Status: **v1 SHIPPED (2026-08-09)** — the live tree is up (T1–T4). The optional **expand-to-full-transcript**
+(a subagent's own tool timeline, via the adapter transcript endpoint) is the remaining follow-up. Depends
+on: Phase-1 presence (`agent-runs`, shipped) + the CC-like view (Tier 1, shipped).
+
+### v1 shipped
+- **T1 ✅** `agent_activity.py` registry (adapter-auth POST, verified-user GET, TTL prune, fail-closed).
+- **T2 ✅** adapter posts subagent lifecycle (`postActivity` on task_started/_progress/_notification →
+  type, status, description, `tool_count` from SDK `usage.tool_uses`, summary, session_id, agent_id).
+  _Deferred:_ the `/subagent/<sid>/<agent>` transcript endpoint (for expand).
+- **T3 ✅** `agentActivity.ts` store — fetch + poll (2.5s while any subagent runs, then stop).
+- **T4 ✅** `AgentActivity.svelte` — "🧩 N subagents" collapsible tree (status dot, type, description,
+  tool count, one-line summary), mounted above the input in `Chat.svelte`; renders nothing when empty.
+  _Deferred:_ expand a row → lazy-load its full tool timeline (needs the T2 transcript endpoint).
+- Verified: a 2-subagent turn populated the tree via the API (type/status/tool_count/summary); the fork
+  render-gate passed and prod renders.
+
+### Follow-up (v2 — expand to full transcript)
+- Adapter `GET /subagent/:sessionId/:agentId` → `getSubagentMessages()` parsed to cards (`TOOLCARD_MAX`);
+  fork proxies it; `AgentActivity.svelte` lazy-loads + caches on row expand. See T2/T4 below.
 
 ## Why
 

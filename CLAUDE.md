@@ -233,6 +233,16 @@ It loads your real **skills** and **memory** so the phone/OWUI Claude behaves li
 - `backend/open_webui/routers/agent_nodes.py` — node registry (fail-closed register).
 - `backend/open_webui/routers/agent_inbox.py` — inbox summaries.
 - `backend/open_webui/routers/agent_terminal_sync.py` — cross-device terminal-list sync (rev LWW).
+- `backend/open_webui/routers/agent_runs.py` — run/question PRESENCE registry (`running`/`needs-input`/
+  `done`; parked AskUserQuestion). Also fires the **needs-input** ntfy push (higher priority).
+- `backend/open_webui/routers/agent_activity.py` — **Agent Activity View (Tier 2)** subagent
+  presence/transcript registry (adapter-auth POST, verified-user GET, proxies transcript to the adapter).
+- `backend/open_webui/utils/agent_notify.py` — **phone push (ntfy)** on done / needs-input; away-gated via
+  `Users.is_user_active`; env `AGENT_NTFY_*`. Hooked from `utils/middleware.py`
+  (`publish_chat_finished_event` = done) + `agent_runs.py` (needs-input). Docs: `docs/EPIC-agent-notifications.md`.
+- `src/lib/components/chat/AgentActivity.svelte` + `src/lib/utils/agentActivity.ts` — the subagent
+  activity tree (collapsible, expand row → tool transcript timeline).
+- `src/lib/components/chat/AgentQuestion.svelte` — the AskUserQuestion / ExitPlanMode card.
 - `backend/open_webui/models/chats.py` — `_primary_model_id()` + `model_id` on all 5 chat-list builders.
 
 ---

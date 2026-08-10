@@ -35,8 +35,13 @@ mcp = FastMCP("agent-tools", host="0.0.0.0", port=int(os.getenv("PORT", "8000"))
 @mcp.tool()
 def publish_artifact(title: str, content_markdown: str) -> str:
     """Publish a markdown summary as a shareable web page on the artifacts board
-    (the artifacts board, at $PUBLIC_BASE/artifacts). Use this to SHOW the user something visual — a report,
-    a summary, results. A phone notification is sent automatically. Returns the page URL.
+    ($PUBLIC_BASE/artifacts) and send a phone notification. Returns the page URL.
+
+    WHEN TO USE: only when the user EXPLICITLY asks you to publish / share / save a page, OR for
+    autonomous / scheduled work where no human is watching to do it themselves (e.g. a scheduled daily
+    brief). For an ordinary reply do NOT auto-publish — the user has a built-in "Publish" button on every
+    message and can pin any reply themselves. Prefer answering in chat; publish only when a durable,
+    shareable link genuinely adds value.
 
     :param title: Short title for the page.
     :param content_markdown: The page body in markdown.
@@ -55,8 +60,12 @@ def publish_artifact(title: str, content_markdown: str) -> str:
 
 @mcp.tool()
 def notify(title: str, message: str, priority: str = "default") -> str:
-    """Send a push notification to the user's phone (ntfy). Use for a quick heads-up / alert /
-    "task done" — no page, just a buzz.
+    """Send a push notification to the user's phone (ntfy) — a quick custom heads-up / alert, no page.
+
+    WHEN TO USE: for a genuinely out-of-band alert the user should see while away — e.g. "build done, 3
+    tests failing", or the result of a scheduled/autonomous task. You do NOT need this just to say a turn
+    finished or that you need input: the hub ALREADY auto-pushes "done" and "needs input" for every turn.
+    Use only for notify-worthy custom messages the automatic pushes don't cover.
 
     :param title: Short notification title.
     :param message: The notification body.

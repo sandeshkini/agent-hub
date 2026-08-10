@@ -172,10 +172,10 @@ index 26e9dd3..608d854 100644
                  for chat in all_chats
 diff --git a/backend/open_webui/routers/agent_activity.py b/backend/open_webui/routers/agent_activity.py
 new file mode 100644
-index 0000000..f22cb5c
+index 0000000..c5416a2
 --- /dev/null
 +++ b/backend/open_webui/routers/agent_activity.py
-@@ -0,0 +1,78 @@
+@@ -0,0 +1,99 @@
 +# LOCAL PATCH (agent-hub fork, EPIC Agent Activity View / Tier 2): per-subagent ACTIVITY registry.
 +#
 +# Purpose: an OPTIONAL, on-demand view of the orchestrator→subagent tree. The main chat stays clean (Tier 1
@@ -190,6 +190,7 @@ index 0000000..f22cb5c
 +import os
 +import time
 +
++import aiohttp
 +from fastapi import APIRouter, Depends, HTTPException, Request
 +
 +from open_webui.utils.auth import get_verified_user
@@ -197,6 +198,7 @@ index 0000000..f22cb5c
 +router = APIRouter()
 +
 +ADAPTER_KEY = os.environ.get("ADAPTER_KEY", "")
++CLAUDE_ADAPTER_URL = os.environ.get("CLAUDE_ADAPTER_URL", "http://owui-claude:9212").rstrip("/")
 +# Drop a chat's whole activity set this long after its last update (a turn finished + nobody's looking).
 +STALE_TTL = int(os.environ.get("AGENT_ACTIVITY_STALE_TTL", "1800"))
 +
@@ -254,6 +256,25 @@ index 0000000..f22cb5c
 +    chat = _activity.get((chat_id or "").strip())
 +    tasks = sorted((chat or {}).get("tasks", {}).values(), key=lambda x: x.get("started_at", 0))
 +    return {"chat_id": chat_id, "tasks": tasks}
++
++
++@router.get("/transcript")
++async def get_transcript(session_id: str, agent_id: str, user=Depends(get_verified_user)):
++    """Browser (Tier 2 v2, on-demand expand): proxy a subagent's tool timeline from the adapter, which has
++    filesystem access to the .jsonl. IDs are validated adapter-side (hex/uuid only, no traversal)."""
++    headers = {"Authorization": f"Bearer {ADAPTER_KEY}"} if ADAPTER_KEY else {}
++    try:
++        async with aiohttp.ClientSession() as s:
++            async with s.get(
++                f"{CLAUDE_ADAPTER_URL}/subagent/{session_id}/{agent_id}",
++                headers=headers,
++                timeout=aiohttp.ClientTimeout(total=8),
++            ) as r:
++                if r.status != 200:
++                    return {"items": []}
++                return await r.json()
++    except Exception:
++        return {"items": []}
 diff --git a/backend/open_webui/routers/agent_answer.py b/backend/open_webui/routers/agent_answer.py
 new file mode 100644
 index 0000000..ee17b5d
@@ -804,27 +825,35 @@ index 0000000..3ad82bf
 +        return incoming
 diff --git a/src/lib/components/chat/AgentActivity.svelte b/src/lib/components/chat/AgentActivity.svelte
 new file mode 100644
-index 0000000..2e4cbf8
+index 0000000..3234df5
 --- /dev/null
 +++ b/src/lib/components/chat/AgentActivity.svelte
-@@ -0,0 +1,61 @@
+@@ -0,0 +1,107 @@
 +<script lang="ts">
 +	// LOCAL PATCH (agent-hub fork, Tier 2 — Agent Activity View): a collapsible orchestrator→subagent tree.
 +	// Off by default (a small "🧩 N subagents" affordance); expand to see each subagent's type, status,
-+	// description, tool count + one-line summary. Live-updates via the agentActivity store while running.
-+	// The MAIN chat stays clean (Tier 1 hides subagent internals) — this is the optional way to inspect them.
++	// description, tool count + one-line summary. Expand a ROW to lazy-load its full tool timeline (v2).
++	// Live-updates via the agentActivity store while running. The MAIN chat stays clean (Tier 1).
 +	import { onDestroy } from 'svelte';
-+	import { agentActivity, loadActivity, pollActivity, stopPollActivity } from '$lib/utils/agentActivity';
++	import {
++		agentActivity,
++		agentTranscripts,
++		loadActivity,
++		loadTranscript,
++		pollActivity,
++		stopPollActivity
++	} from '$lib/utils/agentActivity';
 +
 +	export let chatId: string = '';
 +
 +	let open = false;
 +	let tracked = '';
++	let expanded: Record<string, boolean> = {}; // task_id -> expanded
 +
-+	// (re)load + poll whenever the chat changes
 +	$: if (chatId && chatId !== tracked) {
 +		if (tracked) stopPollActivity(tracked);
 +		tracked = chatId;
++		expanded = {};
 +		loadActivity(chatId);
 +		pollActivity(chatId);
 +	}
@@ -839,6 +868,15 @@ index 0000000..2e4cbf8
 +			: s === 'failed' || s === 'stopped'
 +				? 'bg-red-500'
 +				: 'bg-green-500';
++
++	const toggleRow = (t: any) => {
++		expanded[t.task_id] = !expanded[t.task_id];
++		expanded = expanded;
++		if (expanded[t.task_id] && t.session_id) {
++			loadTranscript(t.session_id, t.agent_id || t.task_id);
++		}
++	};
++	const timelineOf = (t: any) => ($agentTranscripts ?? {})[`${t.session_id}/${t.agent_id || t.task_id}`];
 +</script>
 +
 +{#if tasks.length}
@@ -855,14 +893,43 @@ index 0000000..2e4cbf8
 +		{#if open}
 +			<div class="mt-1.5 ml-1 border-l border-gray-200 dark:border-gray-800 pl-3 flex flex-col gap-1.5">
 +				{#each tasks as t (t.task_id)}
-+					<div class="flex items-start gap-2">
-+						<span class="mt-[5px] size-1.5 rounded-full shrink-0 {dotClass(t.status)}"></span>
-+						<div class="min-w-0">
-+							<div class="text-gray-700 dark:text-gray-300 truncate">
-+								<span class="font-medium">{t.subagent_type ?? 'subagent'}</span>{#if t.description}<span class="text-gray-500 dark:text-gray-400"> · {t.description}</span>{/if}{#if t.tool_count}<span class="text-gray-400"> · {t.tool_count} tool{t.tool_count === 1 ? '' : 's'}</span>{/if}
++					<div>
++						<button
++							type="button"
++							class="w-full flex items-start gap-2 text-left hover:opacity-80"
++							on:click={() => toggleRow(t)}
++						>
++							<span class="mt-[5px] size-1.5 rounded-full shrink-0 {dotClass(t.status)}"></span>
++							<div class="min-w-0 flex-1">
++								<div class="text-gray-700 dark:text-gray-300 truncate">
++									<span class="font-medium">{t.subagent_type ?? 'subagent'}</span>{#if t.description}<span class="text-gray-500 dark:text-gray-400"> · {t.description}</span>{/if}{#if t.tool_count}<span class="text-gray-400"> · {t.tool_count} tool{t.tool_count === 1 ? '' : 's'}</span>{/if}
++								</div>
++								{#if t.summary}<div class="text-gray-500 dark:text-gray-500 truncate">{t.summary}</div>{/if}
 +							</div>
-+							{#if t.summary}<div class="text-gray-500 dark:text-gray-500 truncate">{t.summary}</div>{/if}
-+						</div>
++							{#if t.session_id}<span class="mt-0.5 text-gray-400 transition-transform duration-150 {expanded[t.task_id] ? 'rotate-90' : ''}">›</span>{/if}
++						</button>
++
++						{#if expanded[t.task_id]}
++							{@const items = timelineOf(t)}
++							<div class="mt-1 ml-3.5 border-l border-gray-100 dark:border-gray-850 pl-2.5 flex flex-col gap-1">
++								{#if items === undefined}
++									<div class="text-gray-400 italic">loading…</div>
++								{:else if items.length === 0}
++									<div class="text-gray-400 italic">no recorded steps</div>
++								{:else}
++									{#each items as it}
++										{#if it.kind === 'tool'}
++											<div class="text-gray-600 dark:text-gray-400">
++												<span class="font-mono text-[11px]">▸ {it.name}</span>
++												{#if it.result}<span class="text-gray-400"> — {it.result.slice(0, 100)}</span>{/if}
++											</div>
++										{:else if it.text}
++											<div class="text-gray-500 dark:text-gray-500 whitespace-pre-wrap">{it.text.slice(0, 300)}</div>
++										{/if}
++									{/each}
++								{/if}
++							</div>
++						{/if}
 +					</div>
 +				{/each}
 +			</div>
@@ -1897,10 +1964,10 @@ index cf55bd8..dff14e0 100644
  						on:pointerup|stopPropagation
 diff --git a/src/lib/utils/agentActivity.ts b/src/lib/utils/agentActivity.ts
 new file mode 100644
-index 0000000..cdd63cb
+index 0000000..52a12c3
 --- /dev/null
 +++ b/src/lib/utils/agentActivity.ts
-@@ -0,0 +1,60 @@
+@@ -0,0 +1,90 @@
 +// LOCAL PATCH (agent-hub fork, Tier 2 — Agent Activity View): store for the per-chat subagent tree.
 +// Reads GET /api/v1/agent-activity/?chat_id=<id> (populated by the adapters on task_started/_progress/
 +// _notification). Polls while any subagent is running, then stops. Best-effort — empty = no activity.
@@ -1919,10 +1986,40 @@ index 0000000..cdd63cb
 +	started_at?: number;
 +};
 +
++export type TranscriptItem = {
++	kind: 'text' | 'tool';
++	text?: string;
++	name?: string;
++	input?: string;
++	result?: string;
++};
++
 +// chatId -> tasks[]
 +export const agentActivity = writable<Record<string, SubagentTask[]>>({});
++// `${session_id}/${agent_id}` -> tool timeline (lazy-loaded on expand, cached)
++export const agentTranscripts = writable<Record<string, TranscriptItem[]>>({});
 +
 +const timers: Record<string, any> = {};
++
++// Lazy-load a subagent's tool timeline (Tier 2 v2 — the on-demand "expand" of a tree row). Cached.
++export const loadTranscript = async (sessionId: string, agentId: string): Promise<TranscriptItem[]> => {
++	if (!sessionId || !agentId) return [];
++	const key = `${sessionId}/${agentId}`;
++	try {
++		const r = await fetch(
++			`${WEBUI_API_BASE_URL}/agent-activity/transcript?session_id=${encodeURIComponent(
++				sessionId
++			)}&agent_id=${encodeURIComponent(agentId)}`,
++			{ headers: { Authorization: `Bearer ${localStorage.getItem('token') ?? ''}` } }
++		);
++		const d = r.ok ? await r.json() : {};
++		const items: TranscriptItem[] = Array.isArray(d?.items) ? d.items : [];
++		agentTranscripts.update((m) => ({ ...m, [key]: items }));
++		return items;
++	} catch {
++		return [];
++	}
++};
 +
 +export const loadActivity = async (chatId: string): Promise<SubagentTask[]> => {
 +	if (!chatId) return [];

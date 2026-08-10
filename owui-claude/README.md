@@ -65,7 +65,8 @@ The adapter loads the **same filesystem config** as the CLI so the in-app Claude
 | Token streaming | ✅ full | `includePartialMessages` |
 | Progress / compaction / rate-limit / error surfacing | ✅ | new system-message branches + result-subtype messages |
 | Cost/turn caps, fallback model, effort | ✅ env-gated | `CLAUDE_MAX_TURNS` / `CLAUDE_MAX_BUDGET_USD` / `CLAUDE_FALLBACK_MODEL` / `CLAUDE_EFFORT` |
-| **ExitPlanMode** (plan approve/reject card) | 🟡 gap | renders as a plain tool card; interactive card is the next feature |
+| **ExitPlanMode** (plan approve/reject card) | ✅ full | start a message with `/plan` → SDK plan mode → an interactive Approve / Keep-planning card (see makeCanUseTool) |
+| **Agent activity view** (subagent tree) | ✅ full | Tier 1 hides subagent internals inline; the fork's `AgentActivity` shows an on-demand orchestrator→subagent tree with per-row tool timelines (`/agent-activity`, `/subagent/<sid>/<aid>`) |
 | TodoWrite | 🟡 generic | renders as a tool card (no dedicated checklist UI) |
 | Structured usage (cache tokens / cost) | 🟡 partial | only input/output tokens surfaced |
 | Statusline · checkpoint/rewind UI · output styles · IDE | ⬜ N/A | TUI/editor-only — not applicable to a chat bridge |

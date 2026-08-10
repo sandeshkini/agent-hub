@@ -99,6 +99,50 @@ function postRun(chatId, patch) {
   } catch {}
 }
 
+// Tier 2 v2 (expand-to-transcript): parse a subagent's own .jsonl into a compact tool timeline. Path-safe
+// (hex/uuid ids only, no traversal); confined to CLAUDE_CONFIG_DIR/projects/*/<session>/subagents/.
+function subagentTranscript(sessionId, agentId) {
+  if (!/^[0-9a-f-]{8,64}$/i.test(sessionId) || !/^[0-9a-f]{6,40}$/i.test(agentId)) return null;
+  const base = (process.env.CLAUDE_CONFIG_DIR || (homedir() + "/.claude")) + "/projects";
+  let file = null;
+  try {
+    for (const proj of readdirSync(base)) {
+      const p = `${base}/${proj}/${sessionId}/subagents/agent-${agentId}.jsonl`;
+      if (existsSync(p)) { file = p; break; }
+    }
+  } catch { return null; }
+  if (!file) return null;
+  let raw; try { raw = readFileSync(file, "utf8"); } catch { return null; }
+  const items = [], toolById = {};
+  for (const ln of raw.split("\n")) {
+    if (!ln.trim()) continue;
+    let d; try { d = JSON.parse(ln); } catch { continue; }
+    const m = d && d.message;
+    if (!m || !Array.isArray(m.content)) continue;
+    if (d.type === "assistant") {
+      for (const b of m.content) {
+        if (b.type === "text" && b.text && b.text.trim()) items.push({ kind: "text", text: b.text.slice(0, TOOLCARD_MAX) });
+        else if (b.type === "tool_use") {
+          const it = { kind: "tool", name: b.name, input: JSON.stringify(b.input || {}).slice(0, 400), result: "" };
+          if (b.id) toolById[b.id] = it;
+          items.push(it);
+        }
+      }
+    } else if (d.type === "user") {
+      for (const b of m.content) {
+        if (b.type === "tool_result") {
+          const txt = typeof b.content === "string" ? b.content
+            : Array.isArray(b.content) ? b.content.map((x) => (x && x.type === "text" ? x.text : (x && x.text) || "")).join("\n")
+            : (b.content == null ? "" : JSON.stringify(b.content));
+          const it = toolById[b.tool_use_id];
+          if (it) it.result = String(txt || "").slice(0, TOOLCARD_MAX);
+        }
+      }
+    }
+  }
+  return { session_id: sessionId, agent_id: agentId, items };
+}
+
 // Tier 2 (Agent Activity View): upsert a subagent's activity record into the fork's /agent-activity tree.
 // Fire-and-forget; requires a task_id. The UI reads GET /agent-activity/?chat_id=<id> for the tree.
 function postActivity(chatId, patch) {
@@ -669,6 +713,13 @@ const server = http.createServer((req, res) => {
     return sendJson(res, 200, { object: "list", data: MODELS.map(id => ({ id, object: "model", created: 0, owned_by: "claude" })) });
   }
   if (req.method === "GET" && url.includes("/health")) return sendJson(res, 200, { ok: true });
+  // Tier 2 v2: a subagent's tool timeline (the fork proxies here with the ADAPTER_KEY). /subagent/<sid>/<aid>
+  if (req.method === "GET" && url.includes("/subagent/")) {
+    const mm = url.match(/\/subagent\/([^/?]+)\/([^/?]+)/);
+    if (!mm) return sendJson(res, 400, { error: "bad path" });
+    const t = subagentTranscript(decodeURIComponent(mm[1]), decodeURIComponent(mm[2]));
+    return sendJson(res, t ? 200 : 404, t || { error: "not found" });
+  }
   // E7: the fork's /api/agent/answer proxies the user's AskUserQuestion answer here → resolve the turn.
   if (req.method === "POST" && url.includes("/answer")) {
     let raw = ""; req.on("data", c => raw += c);

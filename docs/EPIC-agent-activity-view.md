@@ -1,24 +1,31 @@
 # EPIC — Agent Activity View (orchestrator → subagent tree)
 
-Status: **v1 SHIPPED (2026-08-09)** — the live tree is up (T1–T4). The optional **expand-to-full-transcript**
-(a subagent's own tool timeline, via the adapter transcript endpoint) is the remaining follow-up. Depends
-on: Phase-1 presence (`agent-runs`, shipped) + the CC-like view (Tier 1, shipped).
+Status: **✅ COMPLETE (v1 + v2, 2026-08-09).** The live orchestrator→subagent tree is up, and each row
+expands on demand to that subagent's full tool timeline. Depends on: Phase-1 presence (`agent-runs`) +
+the CC-like view (Tier 1) — both shipped.
 
-### v1 shipped
-- **T1 ✅** `agent_activity.py` registry (adapter-auth POST, verified-user GET, TTL prune, fail-closed).
-- **T2 ✅** adapter posts subagent lifecycle (`postActivity` on task_started/_progress/_notification →
-  type, status, description, `tool_count` from SDK `usage.tool_uses`, summary, session_id, agent_id).
-  _Deferred:_ the `/subagent/<sid>/<agent>` transcript endpoint (for expand).
-- **T3 ✅** `agentActivity.ts` store — fetch + poll (2.5s while any subagent runs, then stop).
-- **T4 ✅** `AgentActivity.svelte` — "🧩 N subagents" collapsible tree (status dot, type, description,
-  tool count, one-line summary), mounted above the input in `Chat.svelte`; renders nothing when empty.
-  _Deferred:_ expand a row → lazy-load its full tool timeline (needs the T2 transcript endpoint).
-- Verified: a 2-subagent turn populated the tree via the API (type/status/tool_count/summary); the fork
-  render-gate passed and prod renders.
+### Shipped (T1–T6)
+- **T1 ✅** `agent_activity.py` registry (adapter-auth POST, verified-user GET, TTL prune, fail-closed);
+  registered at `/api/v1/agent-activity`.
+- **T2 ✅** adapter (`owui-claude`): `postActivity` on task_started/_progress/_notification → type, status,
+  description, `tool_count` (SDK `usage.tool_uses`), summary, session_id. **Transcript endpoint**
+  `GET /subagent/<sessionId>/<agentId>` parses the subagent `.jsonl` into a compact tool timeline
+  (path-safe: hex/uuid ids only, confined to `CLAUDE_CONFIG_DIR/projects/*/*/subagents/`). Note:
+  `agent_id == task_id` (the file is `agent-<task_id>.jsonl`).
+- **T3 ✅** `agentActivity.ts` store — `loadActivity`+poll (2.5s while running) and `loadTranscript` (lazy,
+  cached) via the fork proxy `GET /agent-activity/transcript`.
+- **T4 ✅** `AgentActivity.svelte` — "🧩 N subagents" collapsible tree (status dot, type, description, tool
+  count, summary); **each row expands** to its lazy-loaded tool timeline (▸ tool · result · text). Mounted
+  above the input in `Chat.svelte`; renders nothing when a turn used no subagents.
+- **T5 ✅** live running dots (poll while running → done/failed), empty state, off-by-default.
+- **T6 ✅** verified end-to-end: 2-subagent turn populated the tree (type/status/tool_count/summary);
+  browser→fork-proxy→adapter transcript returns the timeline (Bash tool + result); gated fork deploy —
+  staging render-checked → prod renders. Docs (this file + `owui-claude/README`) updated.
 
-### Follow-up (v2 — expand to full transcript)
-- Adapter `GET /subagent/:sessionId/:agentId` → `getSubagentMessages()` parsed to cards (`TOOLCARD_MAX`);
-  fork proxies it; `AgentActivity.svelte` lazy-loads + caches on row expand. See T2/T4 below.
+### Not in scope (future ideas, if wanted)
+- Multi-machine: activity is per-hub-chat; remote-node subagents aren't surfaced (v1 assumption).
+- Nested subagents (depth > 1) render flat, not as a deeper tree.
+- Hermes/OpenCode subagents: the tree is Claude-only (only owui-claude posts activity).
 
 ## Why
 

@@ -172,10 +172,10 @@ index 26e9dd3..608d854 100644
                  for chat in all_chats
 diff --git a/backend/open_webui/routers/agent_activity.py b/backend/open_webui/routers/agent_activity.py
 new file mode 100644
-index 0000000..c5416a2
+index 0000000..e889ab4
 --- /dev/null
 +++ b/backend/open_webui/routers/agent_activity.py
-@@ -0,0 +1,99 @@
+@@ -0,0 +1,102 @@
 +# LOCAL PATCH (agent-hub fork, EPIC Agent Activity View / Tier 2): per-subagent ACTIVITY registry.
 +#
 +# Purpose: an OPTIONAL, on-demand view of the orchestrator→subagent tree. The main chat stays clean (Tier 1
@@ -188,6 +188,7 @@ index 0000000..c5416a2
 +# best-effort, pruned by TTL — exactly like agent_runs.py.
 +import hmac
 +import os
++import re
 +import time
 +
 +import aiohttp
@@ -261,7 +262,9 @@ index 0000000..c5416a2
 +@router.get("/transcript")
 +async def get_transcript(session_id: str, agent_id: str, user=Depends(get_verified_user)):
 +    """Browser (Tier 2 v2, on-demand expand): proxy a subagent's tool timeline from the adapter, which has
-+    filesystem access to the .jsonl. IDs are validated adapter-side (hex/uuid only, no traversal)."""
++    filesystem access to the .jsonl. IDs are validated here too (not only adapter-side) — no path-smuggling."""
++    if not re.fullmatch(r"[0-9a-fA-F-]{8,64}", session_id or "") or not re.fullmatch(r"[0-9a-fA-F]{6,40}", agent_id or ""):
++        return {"items": []}
 +    headers = {"Authorization": f"Bearer {ADAPTER_KEY}"} if ADAPTER_KEY else {}
 +    try:
 +        async with aiohttp.ClientSession() as s:
@@ -825,10 +828,10 @@ index 0000000..3ad82bf
 +        return incoming
 diff --git a/src/lib/components/chat/AgentActivity.svelte b/src/lib/components/chat/AgentActivity.svelte
 new file mode 100644
-index 0000000..3234df5
+index 0000000..6ba79eb
 --- /dev/null
 +++ b/src/lib/components/chat/AgentActivity.svelte
-@@ -0,0 +1,107 @@
+@@ -0,0 +1,108 @@
 +<script lang="ts">
 +	// LOCAL PATCH (agent-hub fork, Tier 2 — Agent Activity View): a collapsible orchestrator→subagent tree.
 +	// Off by default (a small "🧩 N subagents" affordance); expand to see each subagent's type, status,
@@ -854,6 +857,7 @@ index 0000000..3234df5
 +		if (tracked) stopPollActivity(tracked);
 +		tracked = chatId;
 +		expanded = {};
++		open = false; // don't carry an expanded tree from the previous chat into this one
 +		loadActivity(chatId);
 +		pollActivity(chatId);
 +	}
@@ -938,10 +942,10 @@ index 0000000..3234df5
 +{/if}
 diff --git a/src/lib/components/chat/AgentQuestion.svelte b/src/lib/components/chat/AgentQuestion.svelte
 new file mode 100644
-index 0000000..1d124cf
+index 0000000..7e5ae29
 --- /dev/null
 +++ b/src/lib/components/chat/AgentQuestion.svelte
-@@ -0,0 +1,105 @@
+@@ -0,0 +1,108 @@
 +<script lang="ts">
 +	// LOCAL PATCH (agent-hub fork, E7): renders a Claude AskUserQuestion as interactive option cards
 +	// and POSTs the user's choice to /api/agent/answer (→ owui-claude /answer → resolves the turn).
@@ -1008,12 +1012,14 @@ index 0000000..1d124cf
 +	};
 +</script>
 +
-+<div class="my-2 rounded-2xl border border-gray-100 dark:border-gray-800 bg-gray-50 dark:bg-gray-900 p-3">
-+	<div class="text-xs font-medium text-gray-500 mb-2 flex items-center gap-1.5">
++<div class="my-2 rounded-2xl border border-gray-100 dark:border-gray-800 bg-gray-50 dark:bg-gray-900 p-3 flex flex-col max-h-[75vh]">
++	<div class="text-xs font-medium text-gray-500 mb-2 flex items-center gap-1.5 shrink-0">
 +		<span class="size-1.5 rounded-full bg-blue-500 animate-pulse"></span>
 +		{$i18n.t('The agent needs your input')}
 +	</div>
 +
++	<!-- scrollable body so a long plan / many options never push the Submit button off-screen (mobile) -->
++	<div class="flex-1 min-h-0 overflow-y-auto">
 +	{#each item.questions ?? [] as q, qi}
 +		<div class="mb-3 last:mb-0">
 +			{#if q?.header}<div class="text-[11px] uppercase tracking-wide text-gray-400 mb-0.5">{q.header}</div>{/if}
@@ -1035,8 +1041,9 @@ index 0000000..1d124cf
 +			</div>
 +		</div>
 +	{/each}
++	</div>
 +
-+	<div class="flex justify-end mt-2">
++	<div class="flex justify-end mt-2 pt-2 border-t border-gray-100 dark:border-gray-800 shrink-0">
 +		<button
 +			type="button"
 +			class="px-3 py-1.5 rounded-xl text-sm font-medium bg-black text-white dark:bg-white dark:text-black disabled:opacity-40 transition"
@@ -1964,10 +1971,10 @@ index cf55bd8..dff14e0 100644
  						on:pointerup|stopPropagation
 diff --git a/src/lib/utils/agentActivity.ts b/src/lib/utils/agentActivity.ts
 new file mode 100644
-index 0000000..52a12c3
+index 0000000..e0db6b8
 --- /dev/null
 +++ b/src/lib/utils/agentActivity.ts
-@@ -0,0 +1,90 @@
+@@ -0,0 +1,99 @@
 +// LOCAL PATCH (agent-hub fork, Tier 2 — Agent Activity View): store for the per-chat subagent tree.
 +// Reads GET /api/v1/agent-activity/?chat_id=<id> (populated by the adapters on task_started/_progress/
 +// _notification). Polls while any subagent is running, then stops. Best-effort — empty = no activity.
@@ -2000,6 +2007,7 @@ index 0000000..52a12c3
 +export const agentTranscripts = writable<Record<string, TranscriptItem[]>>({});
 +
 +const timers: Record<string, any> = {};
++const polling = new Set<string>(); // authority: a tick only reschedules while its chat is still in here
 +
 +// Lazy-load a subagent's tool timeline (Tier 2 v2 — the on-demand "expand" of a tree row). Cached.
 +export const loadTranscript = async (sessionId: string, agentId: string): Promise<TranscriptItem[]> => {
@@ -2038,12 +2046,19 @@ index 0000000..52a12c3
 +	}
 +};
 +
-+// Poll while any subagent is running; stop once they've all settled.
++// Poll while any subagent is running; stop once they've all settled. `polling` is the authority so a tick
++// that's in-flight when the chat is switched away can't resurrect a cleared timer (timer leak), and a
++// hard cap stops a chat whose status is stuck 'running' forever (crashed adapter) instead of polling ∞.
++const POLL_MAX = 240; // ~10 min at 2.5s
 +export const pollActivity = (chatId: string) => {
-+	if (!chatId || timers[chatId]) return;
++	if (!chatId || polling.has(chatId)) return;
++	polling.add(chatId);
++	let n = 0;
 +	const tick = async () => {
++		if (!polling.has(chatId)) return; // stopped while we were away
 +		const tasks = await loadActivity(chatId);
-+		if (tasks.some((t) => t?.status === 'running')) {
++		if (!polling.has(chatId)) return; // stopped during the await
++		if (++n < POLL_MAX && tasks.some((t) => t?.status === 'running')) {
 +			timers[chatId] = setTimeout(tick, 2500);
 +		} else {
 +			stopPollActivity(chatId);
@@ -2053,6 +2068,7 @@ index 0000000..52a12c3
 +};
 +
 +export const stopPollActivity = (chatId: string) => {
++	polling.delete(chatId);
 +	if (timers[chatId]) {
 +		clearTimeout(timers[chatId]);
 +		delete timers[chatId];

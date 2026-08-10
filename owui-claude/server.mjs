@@ -428,6 +428,7 @@ async function* streamTurn(chatId, model, messages, ctx = {}) {
   catch (e) { yield { content: `\n_Claude adapter error: ${e && e.message || e}_` }; return; }
 
   let streamedText = "", tool = {}, toolJson = {}, toolQueue = [], pendingTools = {}, completed = false, toolCardCount = 0;
+  let pendingNotes = [];   // subagent progress notes, buffered and flushed at text-block boundaries (not mid-word)
   let thinking = {};   // FIX(bug1): per-block accumulator for thinking_delta text
   // ── background-subagent drain state (streaming-input fix) ──
   const BG_DRAIN_GRACE_MS = Number(process.env.CLAUDE_BG_DRAIN_GRACE_MS || 4000);   // after tasks drain, wait this long for the model's follow-up synthesis turn before finalizing
@@ -472,16 +473,16 @@ async function* streamTurn(chatId, model, messages, ctx = {}) {
         // a subagent/background task launched — show it so the fan-out is visible in chat.
         usedBackground = true; drainPending = false;
         postActivity(chatId, { task_id: m.task_id, subagent_type: m.subagent_type, description: m.description, status: "running" });
-        yield { content: `\n_↳ subagent started${m.subagent_type ? ` (${m.subagent_type})` : ""}${m.description ? `: ${m.description}` : ""}_\n` };
+        pendingNotes.push(`\n_↳ subagent started${m.subagent_type ? ` (${m.subagent_type})` : ""}${m.description ? `: ${m.description}` : ""}_\n`);
       }
       else if (m.type === "system" && m.subtype === "task_notification") {
         // a background task finished; the SDK re-invokes the model to use its result.
         drainPending = false;
         const st = m.status === "completed" ? "done" : m.status === "failed" ? "failed" : "stopped";
-        const agentId = (String(m.output_file || "").match(/agent-([0-9a-f]+)\.jsonl/) || [])[1];
+        const agentId = (String(m.output_file || "").match(/agent-([0-9a-f]+)\.jsonl/i) || [])[1];
         postActivity(chatId, { task_id: m.task_id, status: st, summary: m.summary, tool_count: m.usage && m.usage.tool_uses, session_id: m.session_id, agent_id: agentId });
         const icon = m.status === "completed" ? "✓" : m.status === "failed" ? "✗" : "◦";
-        yield { content: `\n_${icon} subagent ${m.status || "done"}${m.summary ? `: ${m.summary}` : ""}_\n` };
+        pendingNotes.push(`\n_${icon} subagent ${m.status || "done"}${m.summary ? `: ${m.summary}` : ""}_\n`);
       }
       else if (m.type === "system" && m.subtype === "task_progress") {
         drainPending = false;   // periodic — kept silent in chat, but feeds the activity tree
@@ -523,6 +524,11 @@ async function* streamTurn(chatId, model, messages, ctx = {}) {
           const t = (thinking[ev.index] || "").trim();   // FIX(bug1): emit reasoning block on close
           delete thinking[ev.index];
           if (t) yield { content: reasoningCard(t) };
+        } else if (ev?.type === "content_block_stop") {
+          // text (or any) block ended — a safe boundary to flush buffered subagent notes (so a "✓ subagent
+          // completed" note never splits a word mid-stream, as it did before).
+          for (const n of pendingNotes) yield { content: n };
+          pendingNotes = [];
         }
       } else if (m.type === "assistant") {
         const norm = streamedText.replace(/\s+/g, "");
@@ -561,7 +567,8 @@ async function* streamTurn(chatId, model, messages, ctx = {}) {
         }
       } else if (m.type === "result") {
         // CONV-FLOW (#4): flush any thinking block still open (no content_block_stop arrived before the
-        // result) so its reasoning isn't silently dropped.
+        // result) so its reasoning isn't silently dropped. Also flush any buffered subagent notes.
+        for (const n of pendingNotes) yield { content: n }; pendingNotes = [];
         for (const k of Object.keys(thinking)) { const tk = (thinking[k] || "").trim(); delete thinking[k]; if (tk) yield { content: reasoningCard(tk) }; }
         if (m.session_id) cachePut(conv, m.session_id);
         if (m.usage) yield { usage: m.usage };

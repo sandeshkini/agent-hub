@@ -680,8 +680,10 @@ class H(BaseHTTPRequestHandler):
                     full[0] += d["content"]
                     c = d["content"]
                     w(lambda: send({"content": c}))
-                    mirror.update(full[0])
-            mirror.done(full[0])
+                    if not _finalized[0]:      # don't race the drain's mirror.done() on SIGTERM
+                        mirror.update(full[0])
+            if not _finalized[0]:
+                mirror.done(full[0])
             w(lambda: send({}, finish="stop"))
             w(lambda: raw("data: [DONE]\n\n"))
         except (BrokenPipeError, ConnectionResetError):

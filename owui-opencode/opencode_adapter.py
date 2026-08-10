@@ -16,6 +16,7 @@ import hmac
 import json
 import os
 import queue
+import signal
 import threading
 import time
 import traceback
@@ -47,6 +48,28 @@ _sess_lock = threading.Lock()
 # Different conversations keep their own lock and stay concurrent. Mirrors owui-hermes.
 _conv_locks = {}                   # chat_key -> threading.Lock
 _conv_locks_guard = threading.Lock()
+
+# GRACEFUL DRAIN: without this, a SIGTERM (systemd restart) severs any in-flight SSE with no `[DONE]`, so
+# OWUI persists a broken empty/partial assistant message and the chat can become un-typeable. Each streaming
+# turn registers a finalize() here; on SIGTERM we flush a clean close (partial + "interrupted, resend" note
+# + finish:stop + [DONE]) and mirror it, then exit.
+_active = set()
+_active_lock = threading.Lock()
+_shutting_down = False
+def _graceful_shutdown(signum, _frame):
+    global _shutting_down
+    if _shutting_down:
+        return
+    _shutting_down = True
+    with _active_lock:
+        turns = list(_active)
+    print(f"[owui-opencode] signal {signum} — draining {len(turns)} in-flight turn(s)", flush=True)
+    for fin in turns:
+        try:
+            fin()
+        except Exception:
+            pass
+    threading.Timer(2.5 if turns else 0.1, lambda: os._exit(0)).start()
 
 
 def _conv_lock(k):
@@ -493,17 +516,41 @@ class Handler(BaseHTTPRequestHandler):
                                   "model": model, "messages": messages})
         gone = [False]
         full = [""]
+        _turn_lock = threading.Lock()   # serialize wfile writes between this handler thread and the drain
+        _finalized = [False]
         def w(fn):
             if gone[0]:
                 return
-            try:
-                fn()
-            except (BrokenPipeError, ConnectionResetError):
-                gone[0] = True
+            with _turn_lock:
+                try:
+                    fn()
+                except (BrokenPipeError, ConnectionResetError):
+                    gone[0] = True
         def _usage(u):
             self.wfile.write(("data: " + json.dumps({"id": cid, "object": "chat.completion.chunk",
                 "created": created, "model": model, "choices": [], "usage": u}) + "\n\n").encode())
             self.wfile.flush()
+        def finalize():
+            # SIGTERM drain: flush a clean close (partial + note + [DONE]) so OWUI never stores a broken msg.
+            with _turn_lock:
+                if _finalized[0]:
+                    return
+                _finalized[0] = True
+                note = ("\n\n" if full[0] else "") + "_⚠️ adapter is restarting — this turn was interrupted. Resend to continue._"
+                full[0] += note
+                if not gone[0]:
+                    try:
+                        send({"content": note}); send({}, "stop")
+                        self.wfile.write(b"data: [DONE]\n\n"); self.wfile.flush()
+                    except Exception:
+                        pass
+                gone[0] = True   # suppress any further handler-thread writes so [DONE] is the LAST frame
+            try:
+                mirror.update(full[0]); mirror.done(full[0])
+            except Exception:
+                pass
+        with _active_lock:
+            _active.add(finalize)
         try:
             w(lambda: send({"role": "assistant"}))
             for d in gen:
@@ -548,6 +595,9 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 pass
         finally:
+            _finalized[0] = True
+            with _active_lock:
+                _active.discard(finalize)
             # FIX (1): safety net — if the client is gone with no FF mirror and we never aborted, do so now.
             if gone[0] and not mirror.on and not aborted[0]:
                 aborted[0] = True
@@ -567,6 +617,8 @@ def main():
     if not ADAPTER_KEY:
         raise SystemExit("[owui-opencode] FATAL: ADAPTER_KEY is empty — refusing to start (would be unauthenticated RCE).")
     print(f"[owui-opencode] adapter on 0.0.0.0:{PORT} -> {OC} (auth=on, models={MODELS})", flush=True)
+    signal.signal(signal.SIGTERM, _graceful_shutdown)   # drain in-flight turns before exit (systemd restart)
+    signal.signal(signal.SIGINT, _graceful_shutdown)
     threading.Thread(target=lambda: ff_recover("opencode", _ff_run), daemon=True).start()
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
 

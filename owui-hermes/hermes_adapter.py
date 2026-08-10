@@ -23,6 +23,7 @@ import hashlib
 import hmac
 import json
 import os
+import signal
 import threading
 import time
 import traceback
@@ -59,6 +60,27 @@ _sessions = OrderedDict()               # conv_key -> session_id (LRU)
 _sessions_lock = threading.Lock()
 _conv_locks = {}                        # conv_key -> Lock (serialise per conversation)
 _conv_locks_guard = threading.Lock()
+
+# GRACEFUL DRAIN: a SIGTERM (docker stop / restart) otherwise severs any in-flight SSE with no `[DONE]`, so
+# OWUI persists a broken empty/partial message and the chat can jam. Each streaming turn registers a
+# finalize() here; on SIGTERM we flush a clean close + mirror it, then exit.
+_active = set()
+_active_lock = threading.Lock()
+_shutting_down = False
+def _graceful_shutdown(signum, _frame):
+    global _shutting_down
+    if _shutting_down:
+        return
+    _shutting_down = True
+    with _active_lock:
+        turns = list(_active)
+    print(f"[owui-hermes] signal {signum} — draining {len(turns)} in-flight turn(s)", flush=True)
+    for fin in turns:
+        try:
+            fin()
+        except Exception:
+            pass
+    threading.Timer(2.5 if turns else 0.1, lambda: os._exit(0)).start()
 
 
 # ── auth ──────────────────────────────────────────────────────────────
@@ -611,13 +633,37 @@ class H(BaseHTTPRequestHandler):
             ff_write("hermes", {"cid": chat_id, "mid": mirror.mid, "jwt": mirror.jwt, "messages": messages})
         gone = [False]
         full = [""]
+        _turn_lock = threading.Lock()   # serialize wfile writes between this handler thread and the drain
+        _finalized = [False]
         def w(fn):
             if gone[0]:
                 return
+            with _turn_lock:
+                try:
+                    fn()
+                except (BrokenPipeError, ConnectionResetError):
+                    gone[0] = True                   # client left; keep running if mirroring
+        def finalize():
+            # SIGTERM drain: flush a clean close (partial + note + [DONE]) so OWUI never stores a broken msg.
+            with _turn_lock:
+                if _finalized[0]:
+                    return
+                _finalized[0] = True
+                note = ("\n\n" if full[0] else "") + "_⚠️ adapter is restarting — this turn was interrupted. Resend to continue._"
+                full[0] += note
+                if not gone[0]:
+                    try:
+                        send({"content": note}); send({}, finish="stop")
+                        raw("data: [DONE]\n\n")
+                    except Exception:
+                        pass
+                gone[0] = True   # suppress any further handler-thread writes so [DONE] is the LAST frame
             try:
-                fn()
-            except (BrokenPipeError, ConnectionResetError):
-                gone[0] = True                   # client left; keep running if mirroring
+                mirror.update(full[0]); mirror.done(full[0])
+            except Exception:
+                pass
+        with _active_lock:
+            _active.add(finalize)
         try:
             w(lambda: send({"role": "assistant"}))
             for d in gen:
@@ -655,6 +701,9 @@ class H(BaseHTTPRequestHandler):
             except Exception:
                 pass
         finally:
+            _finalized[0] = True
+            with _active_lock:
+                _active.discard(finalize)
             if mirror.on:  # FF4: run finished (or errored) → drop the durable record
                 ff_clear("hermes", chat_id, mirror.mid)
 
@@ -672,5 +721,7 @@ if __name__ == "__main__":
     _login()
     srv = ThreadingHTTPServer(("0.0.0.0", PORT), H)
     print(f"[owui-hermes v2] streaming /api/ws adapter on 0.0.0.0:{PORT} (auth=on)", flush=True)
+    signal.signal(signal.SIGTERM, _graceful_shutdown)   # drain in-flight turns before exit (docker stop/restart)
+    signal.signal(signal.SIGINT, _graceful_shutdown)
     threading.Thread(target=lambda: ff_recover("hermes", _ff_run), daemon=True).start()
     srv.serve_forever()

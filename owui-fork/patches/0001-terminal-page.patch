@@ -1156,10 +1156,10 @@ index 0000000..1ee7ed5
 +};
 diff --git a/src/lib/components/chat/AgentActivity.svelte b/src/lib/components/chat/AgentActivity.svelte
 new file mode 100644
-index 0000000..6ba79eb
+index 0000000..cc73b3f
 --- /dev/null
 +++ b/src/lib/components/chat/AgentActivity.svelte
-@@ -0,0 +1,108 @@
+@@ -0,0 +1,129 @@
 +<script lang="ts">
 +	// LOCAL PATCH (agent-hub fork, Tier 2 — Agent Activity View): a collapsible orchestrator→subagent tree.
 +	// Off by default (a small "🧩 N subagents" affordance); expand to see each subagent's type, status,
@@ -1194,6 +1194,24 @@ index 0000000..6ba79eb
 +	$: tasks = ($agentActivity ?? {})[chatId] ?? [];
 +	$: running = tasks.filter((t) => t?.status === 'running').length;
 +
++	// The adapter reports BOTH real subagents (Task → has `subagent_type`) and plain background shells
++	// (`Bash(run_in_background)` → no `subagent_type`) through the same task_started event. Only the
++	// former are subagents; calling a backgrounded bash command a "subagent" was just wrong.
++	$: subCount = tasks.filter((t) => t?.subagent_type).length;
++	$: bgCount = tasks.length - subCount;
++	const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? '' : 's'}`;
++	// mixed → the neutral "task"; otherwise name what they actually are
++	$: summaryLabel =
++		subCount && bgCount
++			? plural(tasks.length, 'task')
++			: bgCount
++				? plural(bgCount, 'background task')
++				: plural(subCount, 'subagent');
++
++	// Only a real subagent has its own transcript to expand. Background shells have no session_id, so
++	// expanding one could never resolve — it sat on "loading…" forever.
++	const isExpandable = (t: any) => !!t?.session_id;
++
 +	const dotClass = (s?: string) =>
 +		s === 'running'
 +			? 'bg-blue-500 animate-pulse'
@@ -1202,9 +1220,10 @@ index 0000000..6ba79eb
 +				: 'bg-green-500';
 +
 +	const toggleRow = (t: any) => {
++		if (!isExpandable(t)) return; // nothing to show — don't open an empty, permanently-loading row
 +		expanded[t.task_id] = !expanded[t.task_id];
 +		expanded = expanded;
-+		if (expanded[t.task_id] && t.session_id) {
++		if (expanded[t.task_id]) {
 +			loadTranscript(t.session_id, t.agent_id || t.task_id);
 +		}
 +	};
@@ -1218,7 +1237,7 @@ index 0000000..6ba79eb
 +			class="flex items-center gap-1.5 text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition"
 +			on:click={() => (open = !open)}
 +		>
-+			<span>🧩 {tasks.length} subagent{tasks.length === 1 ? '' : 's'}{running ? ` · ${running} running` : ''}</span>
++			<span>🧩 {summaryLabel}{running ? ` · ${running} running` : ''}</span>
 +			<span class="transition-transform duration-150 {open ? 'rotate-90' : ''}">›</span>
 +		</button>
 +
@@ -1228,13 +1247,15 @@ index 0000000..6ba79eb
 +					<div>
 +						<button
 +							type="button"
-+							class="w-full flex items-start gap-2 text-left hover:opacity-80"
++							class="w-full flex items-start gap-2 text-left {isExpandable(t)
++								? 'hover:opacity-80'
++								: 'cursor-default'}"
 +							on:click={() => toggleRow(t)}
 +						>
 +							<span class="mt-[5px] size-1.5 rounded-full shrink-0 {dotClass(t.status)}"></span>
 +							<div class="min-w-0 flex-1">
 +								<div class="text-gray-700 dark:text-gray-300 truncate">
-+									<span class="font-medium">{t.subagent_type ?? 'subagent'}</span>{#if t.description}<span class="text-gray-500 dark:text-gray-400"> · {t.description}</span>{/if}{#if t.tool_count}<span class="text-gray-400"> · {t.tool_count} tool{t.tool_count === 1 ? '' : 's'}</span>{/if}
++									<span class="font-medium">{t.subagent_type ?? 'background task'}</span>{#if t.description}<span class="text-gray-500 dark:text-gray-400"> · {t.description}</span>{/if}{#if t.tool_count}<span class="text-gray-400"> · {t.tool_count} tool{t.tool_count === 1 ? '' : 's'}</span>{/if}
 +								</div>
 +								{#if t.summary}<div class="text-gray-500 dark:text-gray-500 truncate">{t.summary}</div>{/if}
 +							</div>
@@ -1818,7 +1839,7 @@ index ce1eda9..04a7ab9 100644
  	<div bind:this={terminalEl} class="absolute inset-0 px-0.5" class:pointer-events-none={overlay} />
  </div>
 diff --git a/src/lib/components/layout/Sidebar.svelte b/src/lib/components/layout/Sidebar.svelte
-index f8ac62b..e6f9008 100644
+index f8ac62b..71f501d 100644
 --- a/src/lib/components/layout/Sidebar.svelte
 +++ b/src/lib/components/layout/Sidebar.svelte
 @@ -74,6 +74,7 @@
@@ -1829,7 +1850,7 @@ index f8ac62b..e6f9008 100644
  	import SearchModal from './SearchModal.svelte';
  	import FolderModal from './Sidebar/Folders/FolderModal.svelte';
  	import PinnedModelList from './Sidebar/PinnedModelList.svelte';
-@@ -83,6 +84,12 @@
+@@ -83,9 +84,17 @@
  	import CodeIcon from './Sidebar/icons/Code.svelte';
  	import EditPencilIcon from './Sidebar/icons/EditPencil.svelte';
  	import NotesIcon from './Sidebar/icons/Notes.svelte';
@@ -1842,7 +1863,12 @@ index f8ac62b..e6f9008 100644
  	import SearchIcon from './Sidebar/icons/Search.svelte';
  	import Sidebar from '../icons/Sidebar.svelte';
  	import WorkspaceIcon from './Sidebar/icons/Workspace.svelte';
-@@ -94,7 +101,25 @@
++	// LOCAL PATCH (#137): artifacts board. GlobeAlt, not ArchiveBox — that one is already Inbox.
++	import ArtifactsIcon from '../icons/GlobeAlt.svelte';
+ 	import { slide } from 'svelte/transition';
+ 	import HotkeyHint from '../common/HotkeyHint.svelte';
+ 	import Dropdown from '../common/Dropdown.svelte';
+@@ -94,7 +103,25 @@
  	import MoreHorizontalIcon from './Sidebar/icons/MoreHorizontal.svelte';
  
  	const BREAKPOINT = 768;
@@ -1850,7 +1876,7 @@ index f8ac62b..e6f9008 100644
 +	const DEFAULT_PINNED_ITEMS = ['inbox', 'notes', 'workspace', 'terminal']; // LOCAL PATCH
 +	// LOCAL PATCH (E11 concept C): these render as icons in the bottom bar, not as labeled nav
 +	// rows. Inbox stays a labeled row — it's the cross-machine view. Search moved to the bar too.
-+	const BAR_MENU_ITEMS = ['terminal', 'notes', 'workspace'];
++	const BAR_MENU_ITEMS = ['terminal', 'notes', 'artifacts', 'workspace'];
 +
 +	// LOCAL PATCH (E10): chats scoped to the selected machine (null = All machines → show everything).
 +	// Attribution is by the chat's primary model (node registry maps model id → machine).
@@ -1869,7 +1895,7 @@ index f8ac62b..e6f9008 100644
  
  	let scrollTop = 0;
  
-@@ -145,7 +170,16 @@
+@@ -145,7 +172,16 @@
  
  	let sharedFolders: any[] = [];
  
@@ -1886,17 +1912,18 @@ index f8ac62b..e6f9008 100644
  
  	const isMenuItemVisible = (id) => {
  		switch (id) {
-@@ -175,6 +209,9 @@
+@@ -175,6 +211,10 @@
  				);
  			case 'playground':
  				return $user?.role === 'admin';
 +			case 'terminal': // LOCAL PATCH
 +			case 'inbox': // LOCAL PATCH
++			case 'artifacts': // LOCAL PATCH (#137): hub-wide board, always available
 +				return true;
  			default:
  				return false;
  		}
-@@ -182,8 +219,10 @@
+@@ -182,8 +222,11 @@
  
  	const getMenuItemMeta = (id) => {
  		const items = {
@@ -1904,19 +1931,21 @@ index f8ac62b..e6f9008 100644
  			notes: { label: 'Notes', href: '/notes', iconType: 'note' },
  			workspace: { label: 'Workspace', href: '/workspace', iconType: 'workspace' },
 +			terminal: { label: 'Terminal', href: '/terminal', iconType: 'terminal' }, // LOCAL PATCH
++			artifacts: { label: 'Artifacts', href: '/artifacts', iconType: 'artifacts' }, // LOCAL PATCH (#137)
  			automations: { label: 'Automations', href: '/automations', iconType: 'automations' },
  			calendar: { label: 'Calendar', href: '/calendar', iconType: 'calendar' },
  			playground: { label: 'Playground', href: '/playground', iconType: 'playground' }
-@@ -193,6 +232,8 @@
+@@ -193,6 +236,9 @@
  
  	const menuItemPathPrefixes = {
  		notes: '/notes',
 +		terminal: '/terminal', // LOCAL PATCH
 +		inbox: '/inbox', // LOCAL PATCH
++		artifacts: '/artifacts', // LOCAL PATCH (#137)
  		workspace: '/workspace',
  		calendar: '/calendar',
  		automations: '/automations',
-@@ -1014,6 +1055,7 @@
+@@ -1014,6 +1060,7 @@
  					</Tooltip>
  				</div>
  
@@ -1924,7 +1953,7 @@ index f8ac62b..e6f9008 100644
  				{#each pinnedItems as itemId (itemId)}
  					{@const meta = getMenuItemMeta(itemId)}
  					{#if meta && isMenuItemVisible(itemId)}
-@@ -1049,6 +1091,10 @@
+@@ -1049,6 +1096,10 @@
  											<CalendarIcon className="size-4" strokeWidth="1.5" />
  										{:else if itemId === 'playground'}
  											<CodeIcon className="size-4" strokeWidth="1.5" />
@@ -1935,7 +1964,7 @@ index f8ac62b..e6f9008 100644
  										{/if}
  									</div>
  								</a>
-@@ -1184,6 +1230,9 @@
+@@ -1184,6 +1235,9 @@
  					}
  				}}
  			>
@@ -1945,7 +1974,7 @@ index f8ac62b..e6f9008 100644
  				<div class="pb-1">
  					<div class="px-1 flex justify-center text-gray-700 dark:text-gray-300">
  						<a
-@@ -1206,29 +1255,10 @@
+@@ -1206,29 +1260,10 @@
  						</a>
  					</div>
  
@@ -1978,7 +2007,7 @@ index f8ac62b..e6f9008 100644
  							{@const meta = getMenuItemMeta(itemId)}
  							{#if meta && isMenuItemVisible(itemId)}
  								<div
-@@ -1259,6 +1289,10 @@
+@@ -1259,6 +1294,10 @@
  												<CalendarIcon className="size-4" strokeWidth="1.5" />
  											{:else if itemId === 'playground'}
  												<CodeIcon className="size-4" strokeWidth="1.5" />
@@ -1989,7 +2018,7 @@ index f8ac62b..e6f9008 100644
  											{/if}
  										</div>
  
-@@ -1272,6 +1306,9 @@
+@@ -1272,6 +1311,9 @@
  					</div>
  				</div>
  
@@ -1999,7 +2028,7 @@ index f8ac62b..e6f9008 100644
  				{#if ($models ?? []).length > 0 && (($settings?.pinnedModels ?? []).length > 0 || $config?.default_pinned_models)}
  					<SidebarSection
  						id="sidebar-models"
-@@ -1303,7 +1340,8 @@
+@@ -1303,7 +1345,8 @@
  					</SidebarSection>
  				{/if}
  
@@ -2009,7 +2038,7 @@ index f8ac62b..e6f9008 100644
  					<SidebarSection
  						id="sidebar-channels"
  						bind:open={showChannels}
-@@ -1337,7 +1375,8 @@
+@@ -1337,7 +1380,8 @@
  					</SidebarSection>
  				{/if}
  
@@ -2019,7 +2048,7 @@ index f8ac62b..e6f9008 100644
  					<SidebarSection
  						id="sidebar-folders"
  						bind:open={showFolders}
-@@ -1391,6 +1430,31 @@
+@@ -1391,6 +1435,31 @@
  					</SidebarSection>
  				{/if}
  
@@ -2051,7 +2080,7 @@ index f8ac62b..e6f9008 100644
  				<SidebarSection
  					id="sidebar-chats"
  					className="mt-0.5"
-@@ -1586,13 +1650,13 @@
+@@ -1586,13 +1655,13 @@
  					<div class=" flex-1 flex flex-col overflow-y-auto scrollbar-hidden">
  						<div class="pt-1.5">
  							{#if $chats}
@@ -2069,7 +2098,7 @@ index f8ac62b..e6f9008 100644
  										>
  											{$i18n.t(chat.time_range)}
  											<!-- localisation keys for time_range to be recognized from the i18next parser (so they don't get automatically removed):
-@@ -1624,6 +1688,8 @@
+@@ -1624,6 +1693,8 @@
  										updatedAt={chat.updated_at}
  										lastReadAt={chat.last_read_at}
  										active={chat.active ?? false}
@@ -2078,7 +2107,7 @@ index f8ac62b..e6f9008 100644
  										{shiftKey}
  										selected={selectedChatId === chat.id}
  										on:select={() => {
-@@ -1676,7 +1742,58 @@
+@@ -1676,7 +1747,60 @@
  				<div
  					class=" sidebar-bg-gradient-to-t bg-linear-to-t from-gray-50 dark:from-gray-950 to-transparent from-50% pointer-events-none absolute inset-0 -z-10 -mt-6"
  				></div>
@@ -2124,6 +2153,8 @@ index f8ac62b..e6f9008 100644
 +									<WorkspaceIcon className="size-4" strokeWidth="1.5" />
 +								{:else if itemId === 'terminal'}
 +									<TerminalIcon className="size-4" strokeWidth="1.5" />
++								{:else if itemId === 'artifacts'}
++									<ArtifactsIcon className="size-4" strokeWidth="1.5" />
 +								{:else if itemId === 'automations'}
 +									<ClockIcon className="size-4" strokeWidth="1.5" />
 +								{:else if itemId === 'calendar'}
@@ -2138,7 +2169,7 @@ index f8ac62b..e6f9008 100644
  					{#if $user !== undefined && $user !== null}
  						<UserMenu
  							role={$user?.role}
-@@ -1685,10 +1802,11 @@
+@@ -1685,10 +1809,11 @@
  						>
  							<button
  								type="button"
@@ -2152,7 +2183,7 @@ index f8ac62b..e6f9008 100644
  									<img
  										src={`${WEBUI_API_BASE_URL}/users/${$user?.id}/profile/image`}
  										class="size-5.5 object-cover rounded-full"
-@@ -1708,7 +1826,6 @@
+@@ -1708,7 +1833,6 @@
  										</div>
  									{/if}
  								</div>
@@ -2377,10 +2408,10 @@ index cf55bd8..dff14e0 100644
  						on:pointerup|stopPropagation
 diff --git a/src/lib/utils/agentActivity.ts b/src/lib/utils/agentActivity.ts
 new file mode 100644
-index 0000000..e0db6b8
+index 0000000..aaab22e
 --- /dev/null
 +++ b/src/lib/utils/agentActivity.ts
-@@ -0,0 +1,99 @@
+@@ -0,0 +1,102 @@
 +// LOCAL PATCH (agent-hub fork, Tier 2 — Agent Activity View): store for the per-chat subagent tree.
 +// Reads GET /api/v1/agent-activity/?chat_id=<id> (populated by the adapters on task_started/_progress/
 +// _notification). Polls while any subagent is running, then stops. Best-effort — empty = no activity.
@@ -2431,6 +2462,9 @@ index 0000000..e0db6b8
 +		agentTranscripts.update((m) => ({ ...m, [key]: items }));
 +		return items;
 +	} catch {
++		// Must still WRITE the store: the UI renders "loading…" for as long as this key is `undefined`,
++		// so a bare `return []` left a failed fetch spinning forever. Cache the empty result instead.
++		agentTranscripts.update((m) => ({ ...m, [key]: [] }));
 +		return [];
 +	}
 +};
@@ -2995,6 +3029,158 @@ index 0000000..c37ab96
 +	const n = get(nodes).find((x) => x.id === id);
 +	if (n?.terminal?.id) selectedTerminalId.set(n.terminal.id);
 +}
+diff --git a/src/routes/(app)/artifacts/+page.svelte b/src/routes/(app)/artifacts/+page.svelte
+new file mode 100644
+index 0000000..d966ea0
+--- /dev/null
++++ b/src/routes/(app)/artifacts/+page.svelte
+@@ -0,0 +1,146 @@
++<script lang="ts">
++	// LOCAL PATCH (agent-hub fork, #137): the artifacts board, native inside OWUI.
++	//
++	// The board itself is HUB-ONLY (every machine publishes to the one board), so GET /list is already
++	// the cross-machine view — there's nothing to federate here. Pages are served by the artifacts
++	// container on its own public origin, so rows open in a NEW TAB rather than routing in-app.
++	// Read-only by design: publishing happens from a message's action row (ResponseMessage.svelte).
++	import { onMount, getContext } from 'svelte';
++	import dayjs from '$lib/dayjs';
++	import { showSidebar } from '$lib/stores';
++	import { listArtifacts } from '$lib/apis/artifacts';
++
++	import Spinner from '$lib/components/common/Spinner.svelte';
++	import GlobeAlt from '$lib/components/icons/GlobeAlt.svelte';
++	import Document from '$lib/components/icons/Document.svelte';
++	import Code from '$lib/components/icons/Code.svelte';
++
++	const i18n = getContext('i18n');
++
++	type Artifact = { kind: string; name: string; href: string; url?: string; created?: number };
++
++	let loaded = false;
++	let refreshing = false;
++	let items: Artifact[] = [];
++	// plain string (not a union) so the filter-pill `{#each}` destructuring can assign it without a cast
++	let filter = 'all';
++
++	$: summaries = items.filter((i) => i.kind !== 'app');
++	$: apps = items.filter((i) => i.kind === 'app');
++	$: shown = filter === 'all' ? items : filter === 'app' ? apps : summaries;
++
++	const load = async () => {
++		refreshing = true;
++		try {
++			items = (await listArtifacts(localStorage.token)) ?? [];
++		} finally {
++			refreshing = false;
++			loaded = true;
++		}
++	};
++
++	// `created` is epoch MILLISECONDS from the board (mtime). Guard against a missing value so a
++	// malformed row renders blank instead of "Invalid Date".
++	const when = (ms?: number) => (ms ? dayjs(ms).format('MMM D, YYYY') : '');
++
++	onMount(load);
++</script>
++
++<svelte:head><title>{$i18n.t('Artifacts')}</title></svelte:head>
++
++<div
++	class="flex flex-col w-full h-screen max-h-[100dvh] transition-width duration-200 ease-in-out {$showSidebar
++		? 'md:max-w-[calc(100%-var(--sidebar-width))]'
++		: ''} max-w-full"
++>
++	<div class="flex-1 max-h-full overflow-y-auto">
++		<div class="w-full max-w-3xl mx-auto px-4 pt-4 pb-8">
++			<!-- header -->
++			<div class="flex items-center justify-between gap-2 mb-1">
++				<div class="flex items-center gap-2 min-w-0">
++					<GlobeAlt className="size-5 shrink-0" strokeWidth="1.5" />
++					<h1 class="text-xl font-medium truncate">{$i18n.t('Artifacts')}</h1>
++				</div>
++
++				<button
++					type="button"
++					class="text-xs px-2 py-1 rounded-lg text-gray-600 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-900 transition shrink-0"
++					on:click={load}
++					disabled={refreshing}
++					title={$i18n.t('Refresh')}
++				>
++					{refreshing ? $i18n.t('Refreshing…') : $i18n.t('Refresh')}
++				</button>
++			</div>
++
++			<div class="text-xs text-gray-500 dark:text-gray-400 mb-4">
++				{$i18n.t('Published pages from every machine. Publish one from any reply’s action row.')}
++			</div>
++
++			<!-- filters -->
++			{#if loaded && items.length > 0}
++				<div class="flex items-center gap-1 mb-3 text-sm">
++					{#each [['all', $i18n.t('All'), items.length], ['summary', $i18n.t('Summaries'), summaries.length], ['app', $i18n.t('Apps'), apps.length]] as [key, label, count]}
++						<button
++							type="button"
++							class="px-2.5 py-1 rounded-lg transition whitespace-nowrap {filter === key
++								? 'bg-black/[0.035] dark:bg-white/[0.045] font-medium'
++								: 'text-gray-600 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-900'}"
++							on:click={() => (filter = key)}
++						>
++							{label}
++							<span class="text-gray-500 dark:text-gray-500">{count}</span>
++						</button>
++					{/each}
++				</div>
++			{/if}
++
++			<!-- list -->
++			{#if !loaded}
++				<div class="w-full flex justify-center items-center py-16">
++					<Spinner className="size-5" />
++				</div>
++			{:else if items.length === 0}
++				<div class="text-center py-16 text-sm text-gray-500 dark:text-gray-400">
++					<div class="mb-1">{$i18n.t('No artifacts yet')}</div>
++					<div class="text-xs">
++						{$i18n.t('Hover any assistant reply and click Publish to add one.')}
++					</div>
++				</div>
++			{:else}
++				<div class="flex flex-col gap-0.5">
++					{#each shown as item (item.href)}
++						<a
++							href={item.url ?? item.href}
++							target="_blank"
++							rel="noopener noreferrer"
++							class="flex items-center gap-3 px-2.5 py-2 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-900 transition group"
++						>
++							<span class="shrink-0 text-gray-500 dark:text-gray-400">
++								{#if item.kind === 'app'}
++									<Code className="size-4" strokeWidth="1.5" />
++								{:else}
++									<Document className="size-4" strokeWidth="1.5" />
++								{/if}
++							</span>
++
++							<span class="flex-1 min-w-0 text-sm truncate">{item.name}</span>
++
++							{#if item.kind === 'app'}
++								<span
++									class="shrink-0 text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-black/[0.045] dark:bg-white/[0.06] text-gray-600 dark:text-gray-400"
++								>
++									{$i18n.t('App')}
++								</span>
++							{/if}
++
++							<span class="shrink-0 text-xs text-gray-500 dark:text-gray-500 tabular-nums">
++								{when(item.created)}
++							</span>
++						</a>
++					{/each}
++				</div>
++			{/if}
++		</div>
++	</div>
++</div>
 diff --git a/src/routes/(app)/inbox/+page.svelte b/src/routes/(app)/inbox/+page.svelte
 new file mode 100644
 index 0000000..cfed3cc

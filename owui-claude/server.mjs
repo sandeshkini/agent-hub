@@ -429,6 +429,10 @@ async function* streamTurn(chatId, model, messages, ctx = {}) {
 
   let streamedText = "", tool = {}, toolJson = {}, toolQueue = [], pendingTools = {}, completed = false, toolCardCount = 0;
   let pendingNotes = [];   // subagent progress notes, buffered and flushed at text-block boundaries (not mid-word)
+  // task_id → subagent_type (or null for a plain background shell). `task_started` carries the type but
+  // `task_notification` does NOT, so remember it here to label the completion note consistently.
+  const taskKinds = {};
+  const taskLabel = (id) => (taskKinds[id] ? `subagent (${taskKinds[id]})` : "background task");
   let thinking = {};   // FIX(bug1): per-block accumulator for thinking_delta text
   // ── background-subagent drain state (streaming-input fix) ──
   const BG_DRAIN_GRACE_MS = Number(process.env.CLAUDE_BG_DRAIN_GRACE_MS || 4000);   // after tasks drain, wait this long for the model's follow-up synthesis turn before finalizing
@@ -473,7 +477,10 @@ async function* streamTurn(chatId, model, messages, ctx = {}) {
         // a subagent/background task launched — show it so the fan-out is visible in chat.
         usedBackground = true; drainPending = false;
         postActivity(chatId, { task_id: m.task_id, subagent_type: m.subagent_type, description: m.description, status: "running" });
-        pendingNotes.push(`\n_↳ subagent started${m.subagent_type ? ` (${m.subagent_type})` : ""}${m.description ? `: ${m.description}` : ""}_\n`);
+        taskKinds[m.task_id] = m.subagent_type || null;
+        // Only a Task launch is a subagent; `Bash(run_in_background)` also arrives as task_started with no
+        // subagent_type, and labelling those "subagent" made plain shell commands look like agents.
+        pendingNotes.push(`\n_↳ ${taskLabel(m.task_id)} started${m.description ? `: ${m.description}` : ""}_\n`);
       }
       else if (m.type === "system" && m.subtype === "task_notification") {
         // a background task finished; the SDK re-invokes the model to use its result.
@@ -482,7 +489,7 @@ async function* streamTurn(chatId, model, messages, ctx = {}) {
         const agentId = (String(m.output_file || "").match(/agent-([0-9a-f]+)\.jsonl/i) || [])[1];
         postActivity(chatId, { task_id: m.task_id, status: st, summary: m.summary, tool_count: m.usage && m.usage.tool_uses, session_id: m.session_id, agent_id: agentId });
         const icon = m.status === "completed" ? "✓" : m.status === "failed" ? "✗" : "◦";
-        pendingNotes.push(`\n_${icon} subagent ${m.status || "done"}${m.summary ? `: ${m.summary}` : ""}_\n`);
+        pendingNotes.push(`\n_${icon} ${taskLabel(m.task_id)} ${m.status || "done"}${m.summary ? `: ${m.summary}` : ""}_\n`);
       }
       else if (m.type === "system" && m.subtype === "task_progress") {
         drainPending = false;   // periodic — kept silent in chat, but feeds the activity tree
